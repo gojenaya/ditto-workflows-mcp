@@ -13,10 +13,11 @@ Works with any Ditto workspace — auth is your own workspace API key.
 | `list_untranslated(projectId, variantId?)` | Base items missing the variant |
 | `write_translations(translations[], variantId?, status='WIP')` | Write variants back (creates if missing) |
 | `update_status(projectId, status, ids?/fromStatus?, variantId?)` | Set status on base items or a variant; unknown IDs skipped |
+| `refresh_translation_assets(variantId?)` | Pull all FINAL (expert-approved) base→variant pairs workspace-wide into a local translation-memory file — raw material for distilling a glossary |
 
 Wherever `variantId` is omitted, the default variant applies (config file, or `DITTO_DEFAULT_VARIANT` in `.env`).
 
-**Resource:** `ditto://glossary/{variantId}` — locked terminology + voice rules Claude applies when translating. Backed by `translation-assets/{variantId}-glossary.md` + `{variantId}-voice-rules.md`, or a `translation-assets/{variantId}/` folder of markdown files (gitignored — team-specific, never committed); create your own for your team's glossary. Planned: assets auto-generated from your workspace's FINAL-status copies.
+**Resource:** `ditto://glossary/{variantId}` — locked terminology + voice rules Claude applies when translating. Backed by `translation-assets/{variantId}-glossary.md` + `{variantId}-voice-rules.md`, or a `translation-assets/{variantId}/` folder of markdown files (gitignored — team-specific, never committed). Bootstrap yours from your own workspace: run `refresh_translation_assets`, then have Claude distill the pairs into glossary + voice-rule files. The translation-memory file itself is deliberately *not* served by the resource — it can be hundreds of KB.
 
 ## Setup
 

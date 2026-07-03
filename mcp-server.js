@@ -13,10 +13,11 @@
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { dittoFetch, dittoPatch } from "./ditto-api.js";
+import { getDefaultVariant, setDefaultVariant } from "./config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS = path.join(__dirname, "translation-assets");
@@ -61,6 +62,49 @@ async function fetchVariantIds(projectId, variantId) {
   return new Set(all.filter((i) => i.variantId === variantId).map((i) => i.id));
 }
 
+// Resolve the variant for a call: explicit arg > configured default. No silent
+// fallback — a wrong-variant write is worse than an error.
+function requireVariant(variantId) {
+  const v = variantId || getDefaultVariant();
+  if (!v) {
+    throw new Error(
+      "No variantId given and no default variant configured. " +
+        "Call set_default_variant once, or set DITTO_DEFAULT_VARIANT in .env.",
+    );
+  }
+  return v;
+}
+
+// Glossary files for a variant: flat `{v}-*.md` files and/or everything in
+// `translation-assets/{v}/` (where refresh_translation_assets will write).
+function glossaryFiles(variantId) {
+  const files = [];
+  for (const f of [`${variantId}-glossary.md`, `${variantId}-voice-rules.md`]) {
+    const p = path.join(ASSETS, f);
+    if (fs.existsSync(p)) files.push(p);
+  }
+  const dir = path.join(ASSETS, variantId);
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".md")).sort()) {
+      files.push(path.join(dir, f));
+    }
+  }
+  return files;
+}
+
+// Variants that have glossary assets on disk (for resource listing).
+function availableVariants() {
+  const variants = new Set();
+  let entries = [];
+  try { entries = fs.readdirSync(ASSETS, { withFileTypes: true }); } catch { /* no assets dir */ }
+  for (const e of entries) {
+    const m = e.name.match(/^(.+)-(?:glossary|voice-rules)\.md$/);
+    if (m) variants.add(m[1]);
+    else if (e.isDirectory()) variants.add(e.name);
+  }
+  return [...variants].sort();
+}
+
 // Skip strings that shouldn't be translated (pure numbers/symbols/emoji).
 function isTranslatable(text) {
   if (!text?.trim()) return false;
@@ -92,14 +136,16 @@ server.registerTool(
   {
     title: "List untranslated strings",
     description:
-      "Return the base text items in a project that do NOT yet have the given variant (default 'ar'). " +
-      "Each result is {id, text}. Translate these yourself using the glossary resource, then call write_translations.",
+      "Return the base text items in a project that do NOT yet have the given variant (defaults to the " +
+      "configured default variant). Each result is {id, text}. Translate these yourself using the " +
+      "ditto://glossary/{variantId} resource, then call write_translations.",
     inputSchema: {
       projectId: z.string().describe("Ditto project developer ID"),
-      variantId: z.string().default("ar").describe("Variant to check for (default 'ar')"),
+      variantId: z.string().optional().describe("Variant to check for (default: configured default variant)"),
     },
   },
   async ({ projectId, variantId }) => {
+    variantId = requireVariant(variantId);
     const [base, have] = await Promise.all([
       fetchBaseItems(projectId),
       fetchVariantIds(projectId, variantId),
@@ -128,16 +174,17 @@ server.registerTool(
     title: "Write variant translations",
     description:
       "Write translated variants back to Ditto (public API). Each translation is {id, text} where id is the base " +
-      "item's developer ID. Creates the variant if missing. Defaults: variant 'ar', status 'WIP'.",
+      "item's developer ID. Creates the variant if missing. Defaults: configured default variant, status 'WIP'.",
     inputSchema: {
       translations: z
         .array(z.object({ id: z.string(), text: z.string() }))
         .describe("Array of {id, text} — id is the base item developer ID"),
-      variantId: z.string().default("ar").describe("Variant to write (default 'ar')"),
+      variantId: z.string().optional().describe("Variant to write (default: configured default variant)"),
       status: z.enum(["NONE", "WIP", "REVIEW", "FINAL"]).default("WIP"),
     },
   },
   async ({ translations, variantId, status }) => {
+    variantId = requireVariant(variantId);
     if (!translations.length) {
       return { content: [{ type: "text", text: "No translations provided." }] };
     }
@@ -232,28 +279,58 @@ server.registerTool(
   },
 );
 
-// Glossary + voice rules as a resource so Claude applies the locked terms.
-// Swap the files in translation-assets/ to adapt to another team's glossary.
-server.registerResource(
-  "ar-glossary",
-  "ditto://glossary/ar",
+server.registerTool(
+  "set_default_variant",
   {
-    title: "Arabic glossary + voice rules",
-    description: "Locked terminology and voice rules for Arabic translation.",
+    title: "Set default variant",
+    description:
+      "Set the workspace's default variant (e.g. 'ar', 'fr'). Persisted locally, so it only needs setting " +
+      "once; all tools use it whenever variantId is omitted.",
+    inputSchema: {
+      variantId: z.string().min(1).describe("Ditto variant ID to use as the default"),
+    },
+  },
+  async ({ variantId }) => {
+    setDefaultVariant(variantId);
+    return {
+      content: [{ type: "text", text: `Default variant set to '${variantId}' (saved to .ditto-config.json).` }],
+    };
+  },
+);
+
+// Glossary + voice rules as a resource so Claude applies the locked terms.
+// Any variant with files in translation-assets/ works: flat `{v}-glossary.md` /
+// `{v}-voice-rules.md`, or a `{v}/` folder of .md files.
+server.registerResource(
+  "glossary",
+  new ResourceTemplate("ditto://glossary/{variantId}", {
+    list: async () => ({
+      resources: availableVariants().map((v) => ({
+        uri: `ditto://glossary/${v}`,
+        name: `'${v}' glossary + voice rules`,
+        mimeType: "text/markdown",
+      })),
+    }),
+  }),
+  {
+    title: "Variant glossary + voice rules",
+    description:
+      "Locked terminology and voice rules for translating into a variant. Read this before translating.",
     mimeType: "text/markdown",
   },
-  async (uri) => {
-    const parts = [];
-    for (const f of ["ar-glossary.md", "ar-voice-rules.md"]) {
-      const p = path.join(ASSETS, f);
-      if (fs.existsSync(p)) parts.push(`# ${f}\n\n` + fs.readFileSync(p, "utf8"));
-    }
+  async (uri, { variantId }) => {
+    const parts = glossaryFiles(variantId).map(
+      (p) => `# ${path.basename(p)}\n\n` + fs.readFileSync(p, "utf8"),
+    );
     return {
       contents: [
         {
           uri: uri.href,
           mimeType: "text/markdown",
-          text: parts.join("\n\n---\n\n") || "(glossary files not found)",
+          text:
+            parts.join("\n\n---\n\n") ||
+            `(no glossary files for variant '${variantId}' — add translation-assets/${variantId}-glossary.md ` +
+              `and ${variantId}-voice-rules.md, or a translation-assets/${variantId}/ folder)`,
         },
       ],
     };

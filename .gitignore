@@ -1,5 +1,6 @@
 node_modules/
 .env
+.ditto-config.json
 .DS_Store
 
 # Local-only — workspace-specific, never publish

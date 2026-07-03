@@ -118,7 +118,7 @@ function isTranslatable(text) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.2.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.3.0" });
 
 server.registerTool(
   "list_projects",
@@ -206,6 +206,63 @@ server.registerTool(
         {
           type: "text",
           text: `Wrote ${translations.length} '${variantId}' variant(s) at status ${status}.`,
+        },
+      ],
+    };
+  },
+);
+
+server.registerTool(
+  "list_for_review",
+  {
+    title: "List translations awaiting review",
+    description:
+      "Return a project's variant translations awaiting review (default: statuses WIP and REVIEW), each " +
+      "joined with its base text: {id, base, translation, status}. Reviewer flow: present each translation " +
+      "alongside its base text; the reviewer approves, edits, or skips. Push edits via write_translations " +
+      "with status FINAL; promote untouched approvals via update_status with the variantId and status FINAL.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID"),
+      variantId: z.string().optional().describe("Variant to review (default: configured default variant)"),
+      statuses: z
+        .array(z.enum(["NONE", "WIP", "REVIEW", "FINAL"]))
+        .default(["WIP", "REVIEW"])
+        .describe("Variant statuses to include (default: WIP + REVIEW)"),
+    },
+  },
+  async ({ projectId, variantId, statuses }) => {
+    variantId = requireVariant(variantId);
+    // One call for base + variant; status is filtered client-side so base items
+    // at other statuses still join.
+    const filter = JSON.stringify({
+      projects: [{ id: projectId }],
+      variants: [{ id: variantId }, { id: "base" }],
+    });
+    const all = await dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`);
+
+    const baseText = new Map();
+    for (const i of all) {
+      if (i.variantId === null && i.pluralForm === null) baseText.set(i.id, i.text);
+    }
+    const items = all
+      .filter(
+        (i) =>
+          i.variantId === variantId &&
+          i.pluralForm === null &&
+          statuses.includes(i.status) &&
+          baseText.has(i.id),
+      )
+      .map((i) => ({ id: i.id, base: baseText.get(i.id), translation: i.text, status: i.status }));
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            { projectId, variantId, statuses, count: items.length, items },
+            null,
+            2,
+          ),
         },
       ],
     };

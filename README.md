@@ -12,6 +12,7 @@ Works with any Ditto workspace — auth is your own workspace API key.
 | `set_default_variant(variantId)` | Set the default variant once (e.g. `ar`, `fr`); saved to a gitignored `.ditto-config.json` |
 | `list_untranslated(projectId, variantId?)` | Base items missing the variant |
 | `write_translations(translations[], variantId?, status='WIP')` | Write variants back (creates if missing) |
+| `list_for_review(projectId, variantId?, statuses=['WIP','REVIEW'])` | Pending translations joined with their base text — drive an approve/edit/skip review loop; edits go back via `write_translations` at FINAL, approvals via `update_status` |
 | `update_status(projectId, status, ids?/fromStatus?, variantId?)` | Set status on base items or a variant; unknown IDs skipped |
 | `refresh_translation_assets(variantId?)` | Pull all FINAL (expert-approved) base→variant pairs workspace-wide into a local translation-memory file — raw material for distilling a glossary |
 

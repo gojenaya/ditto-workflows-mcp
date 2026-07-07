@@ -3,6 +3,7 @@ node_modules/
 .ditto-config.json
 .DS_Store
 *.tgz
+.mcp.json
 
 # Local-only — workspace-specific, never publish
 translation-assets/

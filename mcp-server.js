@@ -116,9 +116,57 @@ function isTranslatable(text) {
   return true;
 }
 
+// PATCH with partial-failure retry: drop IDs the API reports as not found —
+// e.g. base items with no variant yet — and patch the rest.
+// Ditto phrases the error singular ("developer ID x not found") or plural
+// ("developer IDs x, y not found").
+async function patchSkippingUnknown(body) {
+  const skipped = [];
+  try {
+    await dittoPatch(body);
+    return { updated: body.updates.length, skipped };
+  } catch (err) {
+    const m = err.message.match(/developer IDs? (.+?) not found/);
+    if (m) {
+      m[1].split(",").map((s) => s.trim()).forEach((id) => skipped.push(id));
+      const bad = new Set(skipped);
+      const filtered = body.updates.filter((u) => !bad.has(u.developerId));
+      if (filtered.length) await dittoPatch({ ...body, updates: filtered });
+      return { updated: filtered.length, skipped };
+    }
+    if (err.message.includes("No text items found")) return { updated: 0, skipped };
+    throw err;
+  }
+}
+
+// Dynamic-content detection for variablise: hardcoded values that should be
+// {{variable}} placeholders. Ported from the ditto-handoff pipeline's
+// variablise.js — the suggestion step is Claude-side, only detection lives here.
+const DYNAMIC_PATTERNS = [
+  { pattern: /\b\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}\b/i, type: "date" },
+  { pattern: /[$€£¥₹]\s*[\d,]+(\.\d{1,2})?/, type: "amount" },
+  { pattern: /\b(AED|USD|EUR|GBP|SAR|INR)\s*[\d,]+(\.\d{1,2})?/i, type: "amount" },
+  { pattern: /\b\d+(\.\d+)?%/, type: "percentage" },
+  { pattern: /[•*]{4}\s*\d{4}/, type: "card_last4" },
+  { pattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/, type: "email" },
+];
+
+// Design-mock status-bar times ("9:41") are dynamic-looking but never real copy.
+function isStatusBarTime(text) {
+  return /^\d{1,2}[:.]\d{2}(\s?(AM|PM))?$/i.test(text.trim());
+}
+
+function detectDynamicTypes(text) {
+  const types = new Set();
+  for (const { pattern, type } of DYNAMIC_PATTERNS) {
+    if (pattern.test(text)) types.add(type);
+  }
+  return [...types];
+}
+
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.3.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.4.0" });
 
 server.registerTool(
   "list_projects",
@@ -131,6 +179,97 @@ server.registerTool(
     const projects = await dittoFetch("/projects");
     return {
       content: [{ type: "text", text: JSON.stringify(projects, null, 2) }],
+    };
+  },
+);
+
+server.registerTool(
+  "list_components",
+  {
+    title: "List Ditto components",
+    description:
+      "List the workspace's component library (shared, reusable strings): {id, name, text, status, folderId}. " +
+      "Check here before writing new copy for common strings (CTAs, errors, labels) — reusing a component " +
+      "keeps copy consistent across projects. Optionally scope to one folder.",
+    inputSchema: {
+      folderId: z.string().optional().describe("Only components in this folder (default: all)"),
+    },
+  },
+  async ({ folderId }) => {
+    const filter = folderId
+      ? `?filter=${encodeURIComponent(JSON.stringify({ folders: [{ id: folderId }] }))}`
+      : "";
+    const all = await dittoFetch(`/components${filter}`);
+    const components = all
+      .filter((c) => c.variantId === null && c.pluralForm === null)
+      .map((c) => ({ id: c.id, name: c.name, text: c.text, status: c.status, folderId: c.folderId }));
+    return {
+      content: [
+        { type: "text", text: JSON.stringify({ count: components.length, components }, null, 2) },
+      ],
+    };
+  },
+);
+
+server.registerTool(
+  "search_text",
+  {
+    title: "Search workspace text",
+    description:
+      "Case-insensitive substring search over base text items (whole workspace, or one project) and the " +
+      "component library. Reuse-oriented: before writing a new string, search for it — an existing item or " +
+      "component may already cover it. Also handy for locating which project/block a string lives in. " +
+      "Returns matches as {id, text, projectId, status} plus component matches; capped at `limit` each.",
+    inputSchema: {
+      query: z.string().min(1).describe("Substring to search for (case-insensitive)"),
+      projectId: z.string().optional().describe("Limit to this project (default: whole workspace)"),
+      limit: z.number().int().positive().max(200).default(50).describe("Max matches returned per list"),
+    },
+  },
+  async ({ query, projectId, limit }) => {
+    const filter = JSON.stringify({
+      ...(projectId ? { projects: [{ id: projectId }] } : {}),
+      statuses: ["NONE", "WIP", "REVIEW", "FINAL"],
+    });
+    const [items, comps] = await Promise.all([
+      dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`),
+      dittoFetch("/components"),
+    ]);
+    const q = query.toLowerCase();
+    const matches = (list) =>
+      list.filter(
+        (i) => i.variantId === null && i.pluralForm === null && i.text?.toLowerCase().includes(q),
+      );
+
+    const textMatches = matches(items);
+    const compMatches = matches(comps);
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              query,
+              textItems: {
+                count: textMatches.length,
+                ...(textMatches.length > limit ? { truncatedTo: limit } : {}),
+                matches: textMatches
+                  .slice(0, limit)
+                  .map((i) => ({ id: i.id, text: i.text, projectId: i.projectId, status: i.status })),
+              },
+              components: {
+                count: compMatches.length,
+                ...(compMatches.length > limit ? { truncatedTo: limit } : {}),
+                matches: compMatches
+                  .slice(0, limit)
+                  .map((c) => ({ id: c.id, name: c.name, text: c.text, folderId: c.folderId })),
+              },
+            },
+            null,
+            2,
+          ),
+        },
+      ],
     };
   },
 );
@@ -208,6 +347,100 @@ server.registerTool(
           text: `Wrote ${translations.length} '${variantId}' variant(s) at status ${status}.`,
         },
       ],
+    };
+  },
+);
+
+server.registerTool(
+  "list_variablisation_candidates",
+  {
+    title: "List variablisation candidates",
+    description:
+      "Find base text items in a project containing hardcoded dynamic values (dates, amounts, percentages, " +
+      "card last-4, emails) that should be {{variable}} placeholders, plus the workspace's existing variables. " +
+      "You suggest the replacements: prefer semantically specific names ({{installment_amount}}, not {{amount}}); " +
+      "reuse an existing variable only when it genuinely fits; keep static text exactly as-is. Present the " +
+      "suggestions for user approval, then apply via update_text. Placeholders are written as literal " +
+      "{{name}} text — variables the workspace lacks must be created in the Ditto web app to resolve.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID"),
+    },
+  },
+  async ({ projectId }) => {
+    const [base, variables] = await Promise.all([
+      fetchBaseItems(projectId),
+      dittoFetch("/variables"),
+    ]);
+    const candidates = base
+      .filter(
+        (i) =>
+          i.text?.trim() &&
+          !i.text.includes("{{") &&
+          !isStatusBarTime(i.text) &&
+          detectDynamicTypes(i.text).length,
+      )
+      .map((i) => ({ id: i.id, text: i.text, types: detectDynamicTypes(i.text) }));
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              projectId,
+              count: candidates.length,
+              candidates,
+              variables: variables.map((v) => ({
+                id: v.id,
+                type: v.type,
+                example: v.data?.example ?? null,
+              })),
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  },
+);
+
+server.registerTool(
+  "update_text",
+  {
+    title: "Update base text",
+    description:
+      "Rewrite the text of BASE items in a project (copy edits, {{variable}} replacements). Each update is " +
+      "{id, text} where id is the item's developer ID; unknown IDs are skipped, not fatal. Status is left " +
+      "unchanged unless given. Note: {{name}} placeholders land as literal text — the public API cannot link " +
+      "workspace variables to items, and dev-ID renames aren't supported either; both happen in the Ditto web app.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID"),
+      updates: z
+        .array(z.object({ id: z.string(), text: z.string() }))
+        .describe("Array of {id, text} — id is the base item developer ID"),
+      status: z.enum(["NONE", "WIP", "REVIEW", "FINAL"]).optional()
+        .describe("Also set this workflow status (default: leave unchanged)"),
+    },
+  },
+  async ({ projectId, updates, status }) => {
+    if (!updates.length) {
+      return { content: [{ type: "text", text: "No updates provided." }] };
+    }
+    const { updated, skipped } = await patchSkippingUnknown({
+      updates: updates.map((u) => ({
+        developerId: u.id,
+        text: u.text,
+        projectId,
+        ...(status ? { status } : {}),
+      })),
+    });
+    return {
+      content: [{
+        type: "text",
+        text: `Updated text on ${updated} base item(s).` +
+          (status ? ` Status → ${status}.` : "") +
+          (skipped.length ? ` Skipped ${skipped.length} unknown ID(s): ${skipped.join(", ")}` : ""),
+      }],
     };
   },
 );
@@ -301,33 +534,10 @@ server.registerTool(
       return { content: [{ type: "text", text: "No matching items to update." }] };
     }
 
-    const body = {
+    const { updated, skipped } = await patchSkippingUnknown({
       ...(variantId ? { variantId } : {}),
       updates: targetIds.map((id) => ({ developerId: id, status, projectId })),
-    };
-
-    // Partial-failure retry: drop IDs the API reports as not found — e.g. base
-    // items with no variant yet — and patch the rest.
-    let updated = 0;
-    const skipped = [];
-    try {
-      await dittoPatch(body);
-      updated = body.updates.length;
-    } catch (err) {
-      // Ditto phrases this singular ("developer ID x not found") or plural ("developer IDs x, y not found")
-      const m = err.message.match(/developer IDs? (.+?) not found/);
-      if (m) {
-        m[1].split(",").map((s) => s.trim()).forEach((id) => skipped.push(id));
-        const bad = new Set(skipped);
-        const filtered = body.updates.filter((u) => !bad.has(u.developerId));
-        if (filtered.length) await dittoPatch({ ...body, updates: filtered });
-        updated = filtered.length;
-      } else if (err.message.includes("No text items found")) {
-        updated = 0;
-      } else {
-        throw err;
-      }
-    }
+    });
 
     const target = variantId ? `'${variantId}' variant(s)` : "base item(s)";
     return {

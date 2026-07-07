@@ -17,10 +17,17 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { dittoFetch, dittoPatch } from "./ditto-api.js";
-import { getDefaultVariant, setDefaultVariant } from "./config.js";
+import { getDefaultVariant, setDefaultVariant, DATA_DIR, CONFIG_PATH } from "./config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ASSETS = path.join(__dirname, "translation-assets");
+// Glossary/TM files: an explicit env override, else a translation-assets/ dir
+// next to the script (clone installs keep working), else the per-user data dir
+// (the only stable location under npx — see config.js).
+const ASSETS =
+  process.env.DITTO_ASSETS_DIR ||
+  (fs.existsSync(path.join(__dirname, "translation-assets"))
+    ? path.join(__dirname, "translation-assets")
+    : path.join(DATA_DIR, "translation-assets"));
 
 // Load .env from this script's dir — Claude Code launches MCP servers without
 // the shell env.
@@ -166,7 +173,7 @@ function detectDynamicTypes(text) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.5.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.6.0" });
 
 server.registerTool(
   "list_projects",
@@ -640,7 +647,7 @@ server.registerTool(
   async ({ variantId }) => {
     setDefaultVariant(variantId);
     return {
-      content: [{ type: "text", text: `Default variant set to '${variantId}' (saved to .ditto-config.json).` }],
+      content: [{ type: "text", text: `Default variant set to '${variantId}' (saved to ${CONFIG_PATH}).` }],
     };
   },
 );
@@ -676,8 +683,8 @@ server.registerResource(
           mimeType: "text/markdown",
           text:
             parts.join("\n\n---\n\n") ||
-            `(no glossary files for variant '${variantId}' — add translation-assets/${variantId}-glossary.md ` +
-              `and ${variantId}-voice-rules.md, or a translation-assets/${variantId}/ folder)`,
+            `(no glossary files for variant '${variantId}' — add ${variantId}-glossary.md ` +
+              `and ${variantId}-voice-rules.md, or a ${variantId}/ folder of .md files, under ${ASSETS})`,
         },
       ],
     };

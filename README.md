@@ -37,19 +37,63 @@ They load automatically when you open Claude Code in this repo. If you installed
 
 ## Setup
 
+**Prerequisites:** Node.js 18+, a Ditto workspace API key (Ditto → workspace settings → API).
+
+### npx (recommended — no clone)
+
+**Claude Code:**
+
 ```bash
-git clone <this repo> && cd ditto-workflows-mcp
-npm install
-echo 'DITTO_API_KEY=<your key>' > .env         # Ditto → workspace settings → API
-echo 'DITTO_DEFAULT_VARIANT=<variant>' >> .env # optional — or use set_default_variant later
-claude mcp add ditto-workflows-mcp -s user -- node "$PWD/mcp-server.js"
+claude mcp add ditto-workflows -s user \
+  -e DITTO_API_KEY=<your key> \
+  -e DITTO_DEFAULT_VARIANT=<variant> \
+  -- npx -y ditto-workflows-mcp@latest
 ```
 
-Restart Claude Code, run `/mcp` — `ditto-workflows-mcp` should show connected. Then just ask:
+(`DITTO_DEFAULT_VARIANT` is optional — you can call `set_default_variant` once instead.)
 
-> "List untranslated strings in *project*, translate them using the glossary, and write them back as WIP."
+**Other MCP clients** (Claude Desktop, Cursor, Windsurf, …) — add to the client's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "ditto-workflows": {
+      "command": "npx",
+      "args": ["-y", "ditto-workflows-mcp@latest"],
+      "env": {
+        "DITTO_API_KEY": "<your key>",
+        "DITTO_DEFAULT_VARIANT": "<variant>"
+      }
+    }
+  }
+}
+```
+
+### From a clone (development)
+
+```bash
+git clone https://github.com/gojenaya/ditto-workflows-mcp && cd ditto-workflows-mcp
+npm install
+echo 'DITTO_API_KEY=<your key>' > .env         # loaded by the server itself
+echo 'DITTO_DEFAULT_VARIANT=<variant>' >> .env # optional
+claude mcp add ditto-workflows -s user -- node "$PWD/mcp-server.js"
+```
 
 `npm test` runs a live smoke test (local-only, not committed; needs the API key).
+
+### Where state lives
+
+| What | Where |
+|---|---|
+| Default-variant config | `~/.ditto-workflows-mcp/config.json` |
+| Glossary + translation-memory files | `~/.ditto-workflows-mcp/translation-assets/` — or a `translation-assets/` dir next to the server in clone installs, which takes precedence |
+| Override the whole data dir | `DITTO_DATA_DIR` env (assets dir alone: `DITTO_ASSETS_DIR`) |
+
+### First run
+
+Restart your client, run `/mcp` — `ditto-workflows` should show connected. Then just ask:
+
+> "List untranslated strings in *project*, translate them using the glossary, and write them back as WIP."
 
 ## Notes
 

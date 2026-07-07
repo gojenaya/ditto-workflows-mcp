@@ -1,6 +1,6 @@
 // Thin client for the Ditto public API (api.dittowords.com/v2).
 // Reads DITTO_API_KEY lazily so callers can load .env before first use.
-import fetch from "node-fetch";
+// Uses the global fetch (Node 18+).
 
 const BASE = "https://api.dittowords.com/v2";
 

@@ -166,7 +166,7 @@ function detectDynamicTypes(text) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.4.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.5.0" });
 
 server.registerTool(
   "list_projects",

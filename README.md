@@ -24,6 +24,17 @@ Wherever `variantId` is omitted, the default variant applies (config file, or `D
 
 **Resource:** `ditto://glossary/{variantId}` — locked terminology + voice rules Claude applies when translating. Backed by `translation-assets/{variantId}-glossary.md` + `{variantId}-voice-rules.md`, or a `translation-assets/{variantId}/` folder of markdown files (gitignored — team-specific, never committed). Bootstrap yours from your own workspace: run `refresh_translation_assets`, then have Claude distill the pairs into glossary + voice-rule files. The translation-memory file itself is deliberately *not* served by the resource — it can be hundreds of KB.
 
+## Skills
+
+Two Claude Code skills ship in `.claude/skills/`, encoding the standard playbooks so a whole workflow is one command instead of a paragraph:
+
+| Skill | What it does |
+|---|---|
+| `/ditto-translate [projectId] [variantId]` | Full translation loop: refresh assets → read the glossary → translate in batches with self-review → write back as WIP → report written + skipped |
+| `/ditto-review [projectId] [variantId]` | Reviewer loop: present pending translations against their base text in batches; approve/edit/skip; edits and approvals become FINAL; refreshes the translation memory afterwards |
+
+They load automatically when you open Claude Code in this repo. If you installed the MCP server user-scope and work from other directories, copy the skill folders to `~/.claude/skills/` to have them everywhere.
+
 ## Setup
 
 ```bash

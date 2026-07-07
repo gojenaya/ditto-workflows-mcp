@@ -6,4 +6,5 @@ node_modules/
 # Local-only — workspace-specific, never publish
 translation-assets/
 test/
-.claude/
+.claude/*
+!.claude/skills/

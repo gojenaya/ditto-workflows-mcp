@@ -1,0 +1,15 @@
+{
+  "name": "ditto-workflows-mcp",
+  "description": "Ditto copy & translation workflows for Claude — MCP server bundled with skills.",
+  "owner": { "name": "gojenaya", "url": "https://github.com/gojenaya" },
+  "plugins": [
+    {
+      "name": "ditto-workflows",
+      "source": "./",
+      "description": "MCP tools for Ditto (projects, translate, review, variablise, components, search) bundled with the /ditto-translate and /ditto-review skills. Installs the server via npx and prompts for your Ditto API key.",
+      "version": "0.6.0",
+      "license": "MIT",
+      "keywords": ["ditto", "dittowords", "localization", "translation"]
+    }
+  ]
+}

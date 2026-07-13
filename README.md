@@ -33,13 +33,24 @@ Two Claude Code skills ship in `.claude/skills/`, encoding the standard playbook
 | `/ditto-translate [projectId] [variantId]` | Full translation loop: refresh assets → read the glossary → translate in batches with self-review → write back as WIP → report written + skipped |
 | `/ditto-review [projectId] [variantId]` | Reviewer loop: present pending translations against their base text in batches; approve/edit/skip; edits and approvals become FINAL; refreshes the translation memory afterwards |
 
-They load automatically when you open Claude Code in this repo. If you installed the MCP server user-scope and work from other directories, copy the skill folders to `~/.claude/skills/` to have them everywhere.
+They load automatically with the plugin install below (or when you open Claude Code in this repo). With the standalone MCP install, copy the skill folders to `~/.claude/skills/` to have them everywhere.
 
 ## Setup
 
 **Prerequisites:** Node.js 18+, a Ditto workspace API key (Ditto → workspace settings → API).
 
-### npx (recommended — no clone)
+### Claude Code plugin (recommended — tools + skills + guided key setup)
+
+Installs the MCP server *and* both skills in one step, and prompts for your API key:
+
+```
+/plugin marketplace add gojenaya/ditto-workflows-mcp
+/plugin install ditto-workflows@ditto-workflows-mcp
+```
+
+You'll be asked for your Ditto API key (and, optionally, a default variant) during install — no manual config editing. The server itself runs via `npx`, so it stays up to date.
+
+### npx (MCP server only, no clone)
 
 **Claude Code:**
 

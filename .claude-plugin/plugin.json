@@ -1,0 +1,35 @@
+{
+  "name": "ditto-workflows",
+  "displayName": "Ditto Workflows",
+  "version": "0.6.0",
+  "description": "Drive Ditto (dittowords.com) copy & translation workflows from Claude — MCP tools plus the /ditto-translate and /ditto-review skills. The server runs via npx; you're prompted for your Ditto API key on install.",
+  "author": { "name": "gojenaya", "url": "https://github.com/gojenaya" },
+  "homepage": "https://github.com/gojenaya/ditto-workflows-mcp",
+  "repository": "https://github.com/gojenaya/ditto-workflows-mcp",
+  "license": "MIT",
+  "keywords": ["ditto", "dittowords", "localization", "translation", "copy", "ux-writing", "mcp"],
+  "skills": "./.claude/skills/",
+  "userConfig": {
+    "ditto_api_key": {
+      "type": "string",
+      "title": "Ditto API key",
+      "description": "Your Ditto workspace API key (Ditto → workspace settings → API).",
+      "sensitive": true
+    },
+    "ditto_default_variant": {
+      "type": "string",
+      "title": "Default variant (optional)",
+      "description": "Variant ID to translate into by default, e.g. 'ar'. Optional — you can run set_default_variant later instead."
+    }
+  },
+  "mcpServers": {
+    "ditto-workflows": {
+      "command": "npx",
+      "args": ["-y", "ditto-workflows-mcp@latest"],
+      "env": {
+        "DITTO_API_KEY": "${user_config.ditto_api_key}",
+        "DITTO_DEFAULT_VARIANT": "${user_config.ditto_default_variant}"
+      }
+    }
+  }
+}

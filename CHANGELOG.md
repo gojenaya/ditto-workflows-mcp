@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Claude Code plugin distribution**: the repo doubles as a plugin marketplace (`.claude-plugin/marketplace.json` + `plugin.json`). `/plugin marketplace add gojenaya/ditto-workflows-mcp` then `/plugin install ditto-workflows@ditto-workflows-mcp` installs the MCP server (via npx) *and* both skills in one step, prompting for the Ditto API key through the plugin's `userConfig`. Closes the gap where npx users didn't get the skills. (Not shipped to npm — plugin manifests are git-only.)
+- **Claude Code plugin distribution**: the repo doubles as a plugin marketplace (`.claude-plugin/marketplace.json`), with the plugin itself under `plugin/` (`plugin/.claude-plugin/plugin.json`, `plugin/.mcp.json`, `plugin/skills/`). `/plugin marketplace add gojenaya/ditto-workflows-mcp` then `/plugin install ditto-workflows@ditto-workflows-mcp` installs the MCP server (via npx) *and* both skills in one step, prompting for the Ditto API key through the plugin's `userConfig`. Closes the gap where npx users didn't get the skills. (Not shipped to npm — plugin files are git-only.)
 
 ## [0.6.0] - 2026-07-07
 

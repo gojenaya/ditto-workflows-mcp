@@ -1,6 +1,6 @@
 {
   "name": "ditto-workflows-mcp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "MCP server for Ditto (dittowords.com) — drive copy workflows and glossary-aware translation from Claude",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/gojenaya/ditto-workflows-mcp.git" },
@@ -8,7 +8,7 @@
   "type": "module",
   "main": "mcp-server.js",
   "bin": { "ditto-workflows-mcp": "mcp-server.js" },
-  "files": ["mcp-server.js", "ditto-api.js", "config.js", "CHANGELOG.md"],
+  "files": ["mcp-server.js", "ditto-api.js", "ditto-backend.js", "config.js", "CHANGELOG.md"],
   "engines": { "node": ">=18.0.0" },
   "scripts": {
     "start": "node mcp-server.js",

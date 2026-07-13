@@ -18,6 +18,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { dittoFetch, dittoPatch } from "./ditto-api.js";
 import { getDefaultVariant, setDefaultVariant, DATA_DIR, CONFIG_PATH } from "./config.js";
+import {
+  setSessionToken, getSessionToken, tokenExpiry, validateToken,
+  fetchWorkspaceDump, renameDevId, TOKEN_HELP,
+} from "./ditto-backend.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Glossary/TM files: an explicit env override, else a translation-assets/ dir
@@ -173,7 +177,7 @@ function detectDynamicTypes(text) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.6.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.7.0" });
 
 server.registerTool(
   "list_projects",
@@ -648,6 +652,144 @@ server.registerTool(
     setDefaultVariant(variantId);
     return {
       content: [{ type: "text", text: `Default variant set to '${variantId}' (saved to ${CONFIG_PATH}).` }],
+    };
+  },
+);
+
+// ─── UNOFFICIAL BACKEND TOOLS (session JWT, not the API key) ───────────────────
+// These replay the Ditto web app's own internal API for operations the public
+// API can't do. Unversioned — Ditto can break them silently. Kept apart from
+// the public-API tools so a breakage stays diagnosable.
+
+server.registerTool(
+  "set_session_token",
+  {
+    title: "Set Ditto session token (unofficial)",
+    description:
+      "Store a Ditto browser-session JWT for this server session, enabling the UNOFFICIAL backend tools " +
+      "(currently: rename_developer_id) that the public API can't cover. The token expires after a while — " +
+      "when a backend tool reports it expired, paste a fresh one here (no server restart needed). " +
+      TOKEN_HELP,
+    inputSchema: {
+      token: z.string().min(20).describe("The Authorization header value from a backend.dittowords.com request (with or without 'Bearer ')"),
+    },
+  },
+  async ({ token }) => {
+    setSessionToken(token);
+    const exp = tokenExpiry(getSessionToken());
+    try {
+      await validateToken();
+    } catch (err) {
+      return { content: [{ type: "text", text: `Token stored but validation failed: ${err.message}` }], isError: true };
+    }
+    const expNote = exp
+      ? exp > new Date()
+        ? ` Expires ${exp.toISOString()} (~${Math.round((exp - Date.now()) / 60000)} min from now).`
+        : ` NOTE: token claims to be already expired (${exp.toISOString()}) yet still validated — Ditto may not enforce exp strictly.`
+      : "";
+    return { content: [{ type: "text", text: `Session token set and validated against the backend.${expNote}` }] };
+  },
+);
+
+server.registerTool(
+  "rename_developer_id",
+  {
+    title: "Rename developer IDs (unofficial)",
+    description:
+      "Rename text-item developer IDs in a project — an operation the public API does not support. " +
+      "UNOFFICIAL: replays the Ditto web app's internal backend API (unversioned; may break without notice) " +
+      "and needs a session token (set_session_token) rather than the API key. Each rename is {from, to}. " +
+      "Skips (with reasons) unknown 'from' IDs and 'to' IDs that already exist. Verifies via the public API " +
+      "afterwards. Keep new IDs kebab-case and reasonably short.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID (public API id, e.g. from list_projects)"),
+      renames: z
+        .array(z.object({ from: z.string().min(1), to: z.string().min(1) }))
+        .min(1)
+        .describe("Array of {from, to} developer-ID renames"),
+    },
+  },
+  async ({ projectId, renames }) => {
+    // 1. Project dev IDs via the public API — used to locate the project's
+    //    mongo id in the backend dump and to catch 'to' collisions.
+    const base = await fetchBaseItems(projectId);
+    if (!base.length) {
+      return { content: [{ type: "text", text: `No text items found in project '${projectId}'.` }], isError: true };
+    }
+    const projectDevIds = new Set(base.map((i) => i.id));
+
+    // 2. Backend dump → find the project's mongo id: the doc_ID group whose
+    //    developerIds overlap the public project's dev IDs. (The old pipeline
+    //    read the mongo id off the web-app URL; headless, we join instead.)
+    const dump = await fetchWorkspaceDump();
+    const overlap = new Map(); // doc_ID → count of matching dev IDs
+    for (const it of dump) {
+      if (it.doc_ID && it.developerId && projectDevIds.has(it.developerId)) {
+        overlap.set(it.doc_ID, (overlap.get(it.doc_ID) || 0) + 1);
+      }
+    }
+    const ranked = [...overlap.entries()].sort((a, b) => b[1] - a[1]);
+    if (!ranked.length) {
+      return {
+        content: [{ type: "text", text: `Could not locate project '${projectId}' in the backend dump (no dev-ID overlap).` }],
+        isError: true,
+      };
+    }
+    if (ranked.length > 1 && ranked[1][1] === ranked[0][1]) {
+      return {
+        content: [{ type: "text", text: `Ambiguous project mapping for '${projectId}' — two backend projects matched equally. Aborting to be safe.` }],
+        isError: true,
+      };
+    }
+    const mongoProjectId = ranked[0][0];
+
+    // devId → mongo _id within the project
+    const idMap = new Map();
+    const backendDevIds = new Set();
+    for (const it of dump) {
+      if (it.doc_ID !== mongoProjectId || !it.developerId) continue;
+      idMap.set(it.developerId, it._id);
+      backendDevIds.add(it.developerId);
+    }
+
+    // 3. Validate + apply sequentially.
+    const results = [];
+    const pendingTo = new Set();
+    for (const { from, to } of renames) {
+      if (from === to) {
+        results.push({ from, to, status: "skipped", reason: "from and to are identical" });
+      } else if (!idMap.has(from)) {
+        results.push({ from, to, status: "skipped", reason: "no item with this developer ID in the project" });
+      } else if (backendDevIds.has(to) || pendingTo.has(to)) {
+        results.push({ from, to, status: "skipped", reason: "an item with the target ID already exists" });
+      } else {
+        try {
+          await renameDevId(mongoProjectId, idMap.get(from), to);
+          pendingTo.add(to);
+          results.push({ from, to, status: "renamed" });
+        } catch (err) {
+          results.push({ from, to, status: "failed", reason: err.message });
+        }
+      }
+    }
+
+    // 4. Verify the successful ones via the public API (cache-busted read).
+    const renamed = results.filter((r) => r.status === "renamed");
+    if (renamed.length) {
+      const after = new Set((await fetchBaseItems(projectId)).map((i) => i.id));
+      for (const r of renamed) {
+        r.verified = after.has(r.to) && !after.has(r.from);
+      }
+    }
+
+    const counts = results.reduce((a, r) => ((a[r.status] = (a[r.status] || 0) + 1), a), {});
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({ projectId, counts, results }, null, 2),
+        },
+      ],
     };
   },
 );

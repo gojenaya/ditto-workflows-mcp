@@ -20,6 +20,15 @@ Works with any Ditto workspace — auth is your own workspace API key.
 | `search_text(query, projectId?, limit=50)` | Substring search over base items + components — find existing copy to reuse, or locate where a string lives |
 | `refresh_translation_assets(variantId?)` | Pull all FINAL (expert-approved) base→variant pairs workspace-wide into a local translation-memory file — raw material for distilling a glossary |
 
+### Unofficial backend tools (session token)
+
+Two extra tools replay the Ditto web app's *internal* API for operations the public API can't do. They're unversioned upstream and may break without notice — kept in a separate module so the official tools above are never affected. Auth is a browser-session JWT, not the API key: open app.dittowords.com → devtools → Network → any `backend.dittowords.com` request → copy the `Authorization` header (or set `DITTO_JWT` in the env).
+
+| Tool | What it does |
+|---|---|
+| `set_session_token(token)` | Store/refresh the session JWT mid-session (validated immediately; expiry reported). When a backend tool says the token expired, paste a fresh one — no restart needed |
+| `rename_developer_id(projectId, renames[])` | Rename developer IDs (`{from, to}` pairs) — not possible via the public API. Skips unknown/colliding IDs with reasons and verifies results via the public API |
+
 Wherever `variantId` is omitted, the default variant applies (config file, or `DITTO_DEFAULT_VARIANT` in `.env`).
 
 **Resource:** `ditto://glossary/{variantId}` — locked terminology + voice rules Claude applies when translating. Backed by `translation-assets/{variantId}-glossary.md` + `{variantId}-voice-rules.md`, or a `translation-assets/{variantId}/` folder of markdown files (gitignored — team-specific, never committed). Bootstrap yours from your own workspace: run `refresh_translation_assets`, then have Claude distill the pairs into glossary + voice-rule files. The translation-memory file itself is deliberately *not* served by the resource — it can be hundreds of KB.

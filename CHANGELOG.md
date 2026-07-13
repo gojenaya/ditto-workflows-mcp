@@ -5,10 +5,14 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-07-13
 
 ### Added
 
+- **Unofficial backend tools** (session JWT, separate `ditto-backend.js` module — public-API tools never depend on it):
+  - `set_session_token` — paste a browser-session JWT mid-session (validated immediately, expiry reported); also honours a `DITTO_JWT` env var.
+  - `rename_developer_id` — rename text-item developer IDs, which the public API cannot do. Locates the project's internal ID by joining the backend workspace dump against public-API dev IDs, skips unknown/colliding renames with reasons, and verifies results via the public API afterwards.
+  - These replay Ditto's internal web-app API: unversioned, may break without notice, and clearly marked UNOFFICIAL in the tool descriptions. Expired tokens produce a "grab a fresh one" message with exact devtools steps instead of a raw 401.
 - **Claude Code plugin distribution**: the repo doubles as a plugin marketplace (`.claude-plugin/marketplace.json`), with the plugin itself under `plugin/` (`plugin/.claude-plugin/plugin.json`, `plugin/.mcp.json`, `plugin/skills/`). `/plugin marketplace add gojenaya/ditto-workflows-mcp` then `/plugin install ditto-workflows@ditto-workflows-mcp` installs the MCP server (via npx) *and* both skills in one step, prompting for the Ditto API key through the plugin's `userConfig`. Closes the gap where npx users didn't get the skills. (Not shipped to npm — plugin files are git-only.)
 
 ## [0.6.0] - 2026-07-07

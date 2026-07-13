@@ -29,6 +29,7 @@ Some operations the public API can't do are covered by replaying the Ditto web a
 | `login_to_ditto()` | Opens a browser window on app.dittowords.com — sign in like normal and the session token is captured automatically (no devtools). Login is remembered locally; the token lasts ~3 days and refreshes are hands-free. First ever run installs a small automation helper (~40 MB, one-time) and uses your own Chrome/Edge |
 | `set_session_token(token)` | Manual alternative: paste the `Authorization` header from devtools (or set `DITTO_JWT` in the env). Validated immediately; expiry reported |
 | `rename_developer_id(projectId, renames[])` | Rename developer IDs (`{from, to}` pairs) — not possible via the public API. Skips unknown/colliding IDs with reasons and verifies results via the public API afterwards |
+| `figma_link_pass(projectId, figmaUrl)` | Wire a Figma frame's copy into a project: existing texts get connected, new ones created as WIP, matches to library components linked. Needs a "Copy link to selection" URL and `FIGMA_API_KEY` (personal access token, file-content read scope) |
 
 Wherever `variantId` is omitted, the default variant applies (config file, or `DITTO_DEFAULT_VARIANT` in `.env`).
 
@@ -40,6 +41,7 @@ Two Claude Code skills ship in `.claude/skills/`, encoding the standard playbook
 
 | Skill | What it does |
 |---|---|
+| `/ditto-handoff [figmaUrl] [projectId]` | Full Figma→Ditto handoff: paste a frame link → copy linked into the project → semantic developer IDs suggested and reviewed → optional promotion to FINAL |
 | `/ditto-translate [projectId] [variantId]` | Full translation loop: refresh assets → read the glossary → translate in batches with self-review → write back as WIP → report written + skipped |
 | `/ditto-review [projectId] [variantId]` | Reviewer loop: present pending translations against their base text in batches; approve/edit/skip; edits and approvals become FINAL; refreshes the translation memory afterwards |
 

@@ -21,8 +21,11 @@ import { dittoFetch, dittoPatch } from "./ditto-api.js";
 import { getDefaultVariant, setDefaultVariant, DATA_DIR, CONFIG_PATH } from "./config.js";
 import {
   setSessionToken, getSessionToken, tokenExpiry, validateToken,
-  fetchWorkspaceDump, renameDevId, TOKEN_HELP,
+  fetchWorkspaceDump, renameDevId, resolveProjectMongoId,
+  createTextItem, connectTextItems, fetchLibraryComponents, linkComponent,
+  newObjectId, toRichText, TOKEN_HELP,
 } from "./ditto-backend.js";
+import { parseFigmaUrl, getFigmaTextNodes, isPlaceholder, normalizeText, FIGMA_KEY_HELP } from "./figma-api.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Glossary/TM files: an explicit env override, else a translation-assets/ dir
@@ -178,7 +181,7 @@ function detectDynamicTypes(text) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.7.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.8.0" });
 
 server.registerTool(
   "list_projects",
@@ -779,6 +782,180 @@ server.registerTool(
 );
 
 server.registerTool(
+  "figma_link_pass",
+  {
+    title: "Link a Figma frame's copy into Ditto (unofficial)",
+    description:
+      "Pull every text node under a Figma frame/section and wire it into a Ditto project: texts matching an " +
+      "existing item are connected to it, new texts become WIP items (created + connected), and texts matching " +
+      "a library component are additionally linked to that component. Returns created items with their " +
+      "auto-generated developer IDs and screen (frame) names — use rename_developer_id afterwards to give the " +
+      "new items semantic IDs. UNOFFICIAL: uses Ditto's internal backend (session token — login_to_ditto) plus " +
+      "the Figma REST API (FIGMA_API_KEY env). The Figma URL must be a 'Copy link to selection' link with a " +
+      "node-id; the target project must already contain at least one text item.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID (public API id, e.g. from list_projects)"),
+      figmaUrl: z.string().describe("Figma 'Copy link to selection' URL (must contain node-id)"),
+    },
+  },
+  async ({ projectId, figmaUrl }) => {
+    const { fileKey, nodeId } = parseFigmaUrl(figmaUrl);
+
+    // 1. Figma text nodes under the selection (placeholders + hidden pruned).
+    const figmaNodes = await getFigmaTextNodes(fileKey, nodeId);
+    const realNodes = figmaNodes.filter((n) => !isPlaceholder(n.text));
+    if (!realNodes.length) {
+      return {
+        content: [{ type: "text", text: `No real copy found under that Figma node (${figmaNodes.length} text node(s), all placeholders/empty).` }],
+      };
+    }
+
+    // 2. Project mongo id + existing items by normalised text.
+    const base = await fetchBaseItems(projectId);
+    if (!base.length) {
+      return {
+        content: [{ type: "text", text: `Project '${projectId}' has no text items yet — the backend mapping needs at least one. Add one item first (e.g. via the Ditto web app or write_translations on a base item).` }],
+        isError: true,
+      };
+    }
+    const dump = await fetchWorkspaceDump();
+    const mongoProjectId = resolveProjectMongoId(dump, new Set(base.map((i) => i.id)));
+    const projectItems = dump.filter((it) => it.doc_ID === mongoProjectId);
+    const textToItems = new Map();
+    for (const item of projectItems) {
+      if (!item.text) continue;
+      const key = normalizeText(item.text);
+      if (!textToItems.has(key)) textToItems.set(key, []);
+      textToItems.get(key).push(item);
+    }
+
+    // 3. Dedup Figma nodes by text (3× "Get started" → 1 item, 3 instances),
+    //    then bucket: connect-to-existing / create / ambiguous.
+    const byText = new Map();
+    for (const node of realNodes) {
+      const key = normalizeText(node.text);
+      if (!byText.has(key)) byText.set(key, { text: node.text, instances: [] });
+      byText.get(key).instances.push(node);
+    }
+    const toLink = [];
+    const toCreate = [];
+    const ambiguous = [];
+    for (const { text, instances } of byText.values()) {
+      const candidates = textToItems.get(normalizeText(text)) || [];
+      if (candidates.length === 0) toCreate.push({ text, instances });
+      else if (candidates.length === 1) toLink.push({ item: candidates[0], instances });
+      else ambiguous.push({ text: text.slice(0, 80), candidates: candidates.length });
+    }
+
+    // 4. Create new WIP items (one POST each — we need the _ids back).
+    const created = [];
+    const createFailed = [];
+    for (const { text, instances } of toCreate) {
+      try {
+        const item = await createTextItem(mongoProjectId, text);
+        created.push({ item: { ...item, text }, instances });
+      } catch (err) {
+        createFailed.push({ text: text.slice(0, 80), error: err.message });
+      }
+    }
+
+    // 5. One connect PATCH for everything.
+    const instancesByItemId = {};
+    for (const { item, instances } of [...toLink, ...created]) {
+      if (!item._id) continue;
+      instancesByItemId[item._id] = instances.map((node) => ({
+        _id: newObjectId(),
+        figmaNodeId: node.figmaNodeId,
+        figmaPageId: node.pageId,
+        figmaTopLevelFrameId: node.topLevelFrameId,
+        lastReconciledRichText: toRichText(node.text),
+        appliedVariantId: null,
+        position: node.position,
+      }));
+    }
+    const totalInstances = Object.values(instancesByItemId).reduce((a, arr) => a + arr.length, 0);
+    if (totalInstances) await connectTextItems(mongoProjectId, instancesByItemId);
+
+    // 6. Component links: texts that also exist as library components get
+    //    linked to them (skipping items already linked — idempotent).
+    const componentLinks = [];
+    try {
+      const compIndex = new Map();
+      for (const c of await fetchLibraryComponents()) {
+        const key = normalizeText(c.text);
+        if (key && !compIndex.has(key)) compIndex.set(key, c);
+      }
+      const linkByComp = new Map();
+      for (const { item } of [...toLink, ...created]) {
+        const hit = compIndex.get(normalizeText(item.text));
+        if (!hit || !item._id) continue;
+        if (Array.isArray(hit.instances) && hit.instances.includes(item._id)) continue;
+        if (!linkByComp.has(hit._id)) linkByComp.set(hit._id, { component: hit, itemIds: [] });
+        linkByComp.get(hit._id).itemIds.push(item._id);
+      }
+      for (const [compId, { component, itemIds }] of linkByComp) {
+        try {
+          await linkComponent(compId, mongoProjectId, itemIds);
+          componentLinks.push({ component: component.developerId || component.name, items: itemIds.length });
+        } catch (err) {
+          componentLinks.push({ component: component.developerId || component.name, error: err.message });
+        }
+      }
+    } catch (err) {
+      componentLinks.push({ error: `component pass skipped: ${err.message}` });
+    }
+
+    // 7. Re-fetch for the auto-assigned dev IDs of created items, and map each
+    //    to its screen (frame name) — context for semantic rename suggestions.
+    const after = await fetchWorkspaceDump();
+    const byMongoId = new Map(after.filter((i) => i.doc_ID === mongoProjectId).map((i) => [i._id, i]));
+    const createdReport = created.map(({ item, instances }) => ({
+      devId: byMongoId.get(item._id)?.developerId || null,
+      text: item.text,
+      screen: instances[0]?.frameName || "Unknown",
+      instances: instances.length,
+    }));
+    const linkedReport = toLink.map(({ item, instances }) => ({
+      devId: item.developerId,
+      text: item.text.slice(0, 80),
+      screen: instances[0]?.frameName || "Unknown",
+      instances: instances.length,
+    }));
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              projectId,
+              figma: { fileKey, nodeId },
+              counts: {
+                figmaTextNodes: figmaNodes.length,
+                afterPlaceholderFilter: realNodes.length,
+                uniqueTexts: byText.size,
+                connectedToExisting: toLink.length,
+                created: created.length,
+                createFailed: createFailed.length,
+                ambiguousSkipped: ambiguous.length,
+                instancesConnected: totalInstances,
+              },
+              created: createdReport,
+              connectedToExisting: linkedReport,
+              ...(ambiguous.length ? { ambiguous } : {}),
+              ...(createFailed.length ? { createFailed } : {}),
+              ...(componentLinks.length ? { componentLinks } : {}),
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  },
+);
+
+server.registerTool(
   "rename_developer_id",
   {
     title: "Rename developer IDs (unofficial)",
@@ -805,30 +982,9 @@ server.registerTool(
     }
     const projectDevIds = new Set(base.map((i) => i.id));
 
-    // 2. Backend dump → find the project's mongo id: the doc_ID group whose
-    //    developerIds overlap the public project's dev IDs. (The old pipeline
-    //    read the mongo id off the web-app URL; headless, we join instead.)
+    // 2. Backend dump → project mongo id (dev-ID join; see ditto-backend.js).
     const dump = await fetchWorkspaceDump();
-    const overlap = new Map(); // doc_ID → count of matching dev IDs
-    for (const it of dump) {
-      if (it.doc_ID && it.developerId && projectDevIds.has(it.developerId)) {
-        overlap.set(it.doc_ID, (overlap.get(it.doc_ID) || 0) + 1);
-      }
-    }
-    const ranked = [...overlap.entries()].sort((a, b) => b[1] - a[1]);
-    if (!ranked.length) {
-      return {
-        content: [{ type: "text", text: `Could not locate project '${projectId}' in the backend dump (no dev-ID overlap).` }],
-        isError: true,
-      };
-    }
-    if (ranked.length > 1 && ranked[1][1] === ranked[0][1]) {
-      return {
-        content: [{ type: "text", text: `Ambiguous project mapping for '${projectId}' — two backend projects matched equally. Aborting to be safe.` }],
-        isError: true,
-      };
-    }
-    const mongoProjectId = ranked[0][0];
+    const mongoProjectId = resolveProjectMongoId(dump, projectDevIds);
 
     // devId → mongo _id within the project
     const idMap = new Map();

@@ -1,15 +1,40 @@
 {
   "name": "ditto-workflows-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "MCP server for Ditto (dittowords.com) — drive copy workflows and glossary-aware translation from Claude",
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/gojenaya/ditto-workflows-mcp.git" },
-  "keywords": ["mcp", "modelcontextprotocol", "ditto", "dittowords", "localization", "translation", "copy", "ux-writing", "claude"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gojenaya/ditto-workflows-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "ditto",
+    "dittowords",
+    "localization",
+    "translation",
+    "copy",
+    "ux-writing",
+    "claude"
+  ],
   "type": "module",
   "main": "mcp-server.js",
-  "bin": { "ditto-workflows-mcp": "mcp-server.js" },
-  "files": ["mcp-server.js", "ditto-api.js", "ditto-backend.js", "ditto-login.js", "config.js", "CHANGELOG.md"],
-  "engines": { "node": ">=18.0.0" },
+  "bin": {
+    "ditto-workflows-mcp": "mcp-server.js"
+  },
+  "files": [
+    "mcp-server.js",
+    "ditto-api.js",
+    "ditto-backend.js",
+    "ditto-login.js",
+    "figma-api.js",
+    "config.js",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "start": "node mcp-server.js",
     "test": "node test/smoke-test.js"

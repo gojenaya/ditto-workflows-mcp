@@ -20,6 +20,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { randomBytes } from "crypto";
 import { DATA_DIR } from "./config.js";
 
 const BACKEND = "https://backend.dittowords.com";
@@ -120,5 +121,88 @@ export async function renameDevId(projectMongoId, itemMongoId, developerId) {
   return backendFetch(`/ditto-project/${projectMongoId}/text-item/${itemMongoId}/developerId`, {
     method: "PATCH",
     body: JSON.stringify({ developerId }),
+  });
+}
+
+// Locate a project's mongo id headlessly: the dump's doc_ID group whose
+// developerIds overlap the project's public-API dev IDs. (The old pipeline
+// read the id off the web-app URL — no browser here.) Fails on an empty
+// project: with no items there is nothing to join on.
+export function resolveProjectMongoId(dump, projectDevIds) {
+  const overlap = new Map();
+  for (const it of dump) {
+    if (it.doc_ID && it.developerId && projectDevIds.has(it.developerId)) {
+      overlap.set(it.doc_ID, (overlap.get(it.doc_ID) || 0) + 1);
+    }
+  }
+  const ranked = [...overlap.entries()].sort((a, b) => b[1] - a[1]);
+  if (!ranked.length) {
+    throw new Error(
+      "Could not locate the project in the backend (no dev-ID overlap). Note: this mapping needs the " +
+        "project to contain at least one text item already.",
+    );
+  }
+  if (ranked.length > 1 && ranked[1][1] === ranked[0][1]) {
+    throw new Error("Ambiguous project mapping — two backend projects matched equally. Aborting to be safe.");
+  }
+  return ranked[0][0];
+}
+
+// ─── Link-pass endpoints (create / connect / component-link) ──────────────────
+
+// Mongo-style ObjectId for instance records (timestamp + random, as the web app does).
+export function newObjectId() {
+  const ts = Math.floor(Date.now() / 1000).toString(16).padStart(8, "0");
+  return ts + randomBytes(8).toString("hex");
+}
+
+export function toRichText(text) {
+  return { type: "doc", content: [{ type: "paragraph", content: text ? [{ type: "text", text }] : [] }] };
+}
+
+// One POST per text — we need each created item's _id back.
+export async function createTextItem(projectMongoId, text) {
+  const result = await backendFetch(`/ditto-project/${projectMongoId}/text-items`, {
+    method: "POST",
+    body: JSON.stringify({
+      textItems: [{ text, richText: toRichText(text), status: "WIP" }],
+      source: "plugin_text_import",
+    }),
+  });
+  const created = Array.isArray(result)
+    ? result[0]
+    : result.textItems?.[0] || result.textItem || result.items?.[0] || result;
+  if (!created?._id) throw new Error(`create returned no _id: ${JSON.stringify(result).slice(0, 200)}`);
+  return created;
+}
+
+// Single PATCH linking every Figma text-node instance to its item's mongo id.
+export async function connectTextItems(projectMongoId, figmaTextNodeInstancesByTextItemId) {
+  return backendFetch(`/ditto-project/${projectMongoId}/text-items/connect`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      figmaTextNodeInstancesByTextItemId,
+      fromBlockSuggestion: false,
+      source: "text-suggestion",
+    }),
+  });
+}
+
+// All library components with mongo _ids. The list endpoint takes a SINGULAR
+// folderId (plural folderIds[] returns nothing) — enumerate folders first.
+export async function fetchLibraryComponents() {
+  const foldersResp = await backendFetch("/library-component-folder?fields=_id");
+  const all = [];
+  for (const f of foldersResp.folders || []) {
+    const resp = await backendFetch(`/library-component?folderId=${f._id}`);
+    if (Array.isArray(resp.components)) all.push(...resp.components);
+  }
+  return all;
+}
+
+export async function linkComponent(componentMongoId, projectMongoId, textItemIds) {
+  return backendFetch(`/library-component/${componentMongoId}/link`, {
+    method: "PATCH",
+    body: JSON.stringify({ projectId: projectMongoId, textItemIds, wasSuggested: false }),
   });
 }

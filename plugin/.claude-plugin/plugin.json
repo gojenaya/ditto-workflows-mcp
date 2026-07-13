@@ -8,7 +8,6 @@
   "repository": "https://github.com/gojenaya/ditto-workflows-mcp",
   "license": "MIT",
   "keywords": ["ditto", "dittowords", "localization", "translation", "copy", "ux-writing", "mcp"],
-  "skills": "./.claude/skills/",
   "userConfig": {
     "ditto_api_key": {
       "type": "string",
@@ -20,16 +19,6 @@
       "type": "string",
       "title": "Default variant (optional)",
       "description": "Variant ID to translate into by default, e.g. 'ar'. Optional — you can run set_default_variant later instead."
-    }
-  },
-  "mcpServers": {
-    "ditto-workflows": {
-      "command": "npx",
-      "args": ["-y", "ditto-workflows-mcp@latest"],
-      "env": {
-        "DITTO_API_KEY": "${user_config.ditto_api_key}",
-        "DITTO_DEFAULT_VARIANT": "${user_config.ditto_default_variant}"
-      }
     }
   }
 }

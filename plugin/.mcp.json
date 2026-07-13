@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ditto-workflows": {
+      "command": "npx",
+      "args": ["-y", "ditto-workflows-mcp@latest"],
+      "env": {
+        "DITTO_API_KEY": "${user_config.ditto_api_key}",
+        "DITTO_DEFAULT_VARIANT": "${user_config.ditto_default_variant}"
+      }
+    }
+  }
+}

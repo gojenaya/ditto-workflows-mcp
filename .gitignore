@@ -3,10 +3,10 @@ node_modules/
 .ditto-config.json
 .DS_Store
 *.tgz
-.mcp.json
+# root dev config has an absolute path — ignore it; the plugin's plugin/.mcp.json IS tracked
+/.mcp.json
 
 # Local-only — workspace-specific, never publish
 translation-assets/
 test/
-.claude/*
-!.claude/skills/
+.claude/

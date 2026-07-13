@@ -8,7 +8,7 @@
   "type": "module",
   "main": "mcp-server.js",
   "bin": { "ditto-workflows-mcp": "mcp-server.js" },
-  "files": ["mcp-server.js", "ditto-api.js", "ditto-backend.js", "config.js", "CHANGELOG.md"],
+  "files": ["mcp-server.js", "ditto-api.js", "ditto-backend.js", "ditto-login.js", "config.js", "CHANGELOG.md"],
   "engines": { "node": ">=18.0.0" },
   "scripts": {
     "start": "node mcp-server.js",

@@ -12,6 +12,7 @@
 //
 import * as fs from "fs";
 import * as path from "path";
+import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -688,6 +689,92 @@ server.registerTool(
         : ` NOTE: token claims to be already expired (${exp.toISOString()}) yet still validated — Ditto may not enforce exp strictly.`
       : "";
     return { content: [{ type: "text", text: `Session token set and validated against the backend.${expNote}` }] };
+  },
+);
+
+server.registerTool(
+  "login_to_ditto",
+  {
+    title: "Log in to Ditto in a browser (captures session token)",
+    description:
+      "Open a real browser window on app.dittowords.com so the user can sign in like normal — the session " +
+      "token is captured automatically and stored (no devtools, no copy-pasting). Use this when a backend " +
+      "tool reports a missing/expired session token. The login is remembered in a local browser profile, so " +
+      "future refreshes usually complete hands-free in seconds. First ever run installs a small browser-" +
+      "automation helper into the local data dir (~40 MB, one-time, may take a minute). Tell the user a " +
+      "browser window is about to open before calling this.",
+    inputSchema: {},
+  },
+  async () => {
+    const loginScript = path.join(__dirname, "ditto-login.js");
+    const helperDir = path.join(DATA_DIR, "login-helper");
+    const env = { ...process.env, DITTO_DATA_DIR: DATA_DIR };
+
+    const run = (cmd, args, timeoutMs) =>
+      new Promise((resolve) => {
+        const child = spawn(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+        let stdout = "", stderr = "";
+        const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+        child.stdout.on("data", (d) => (stdout += d));
+        child.stderr.on("data", (d) => (stderr += d));
+        child.on("close", (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+        child.on("error", (err) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: String(err) }); });
+      });
+
+    const attempt = () => run(process.execPath, [loginScript], 6 * 60 * 1000);
+
+    let result = await attempt();
+    let parsed = null;
+    try { parsed = JSON.parse(result.stdout.trim().split("\n").pop()); } catch { /* no JSON */ }
+
+    // First run: playwright isn't installed anywhere — install it into our own
+    // data dir (keeps it out of the npm package deps) and retry once.
+    if (parsed?.needsPlaywright) {
+      fs.mkdirSync(helperDir, { recursive: true });
+      const install = await run(
+        "npm",
+        ["install", "playwright", "--prefix", helperDir, "--no-fund", "--no-audit"],
+        3 * 60 * 1000,
+      );
+      if (install.code !== 0) {
+        return {
+          content: [{
+            type: "text",
+            text: `Could not install the browser-automation helper (npm exit ${install.code}): ` +
+              `${install.stderr.slice(-300)}\nManual fallback: ${TOKEN_HELP}`,
+          }],
+          isError: true,
+        };
+      }
+      result = await attempt();
+      try { parsed = JSON.parse(result.stdout.trim().split("\n").pop()); } catch { parsed = null; }
+    }
+
+    if (!parsed?.ok || !parsed.token) {
+      return {
+        content: [{
+          type: "text",
+          text: `Browser login failed: ${parsed?.error || result.stderr.slice(-300) || "no output"}\n` +
+            `Manual fallback: ${TOKEN_HELP}`,
+        }],
+        isError: true,
+      };
+    }
+
+    setSessionToken(parsed.token);
+    try {
+      await validateToken();
+    } catch (err) {
+      return { content: [{ type: "text", text: `Token captured but validation failed: ${err.message}` }], isError: true };
+    }
+    const exp = tokenExpiry(getSessionToken());
+    return {
+      content: [{
+        type: "text",
+        text: "Logged in — session token captured, validated, and cached." +
+          (exp ? ` Expires ${exp.toISOString()} (~${Math.round((exp - Date.now()) / 3600000)}h from now).` : ""),
+      }],
+    };
   },
 );
 

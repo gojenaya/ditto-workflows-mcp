@@ -18,17 +18,28 @@
 //   PATCH /ditto-project/{projectMongoId}/text-item/{itemMongoId}/developerId
 //     body {"developerId": "new-id"} → 200 {updatedTextItems:[…]}
 
+import * as fs from "fs";
+import * as path from "path";
+import { DATA_DIR } from "./config.js";
+
 const BACKEND = "https://backend.dittowords.com";
+const TOKEN_CACHE = path.join(DATA_DIR, "session-token");
 
 let sessionToken = null;
 
 export const TOKEN_HELP =
-  "Get a fresh session token: open app.dittowords.com (logged in) → devtools → Network tab → " +
-  "click any request to backend.dittowords.com → copy the value of the 'Authorization' request " +
-  "header (with or without the 'Bearer ' prefix) → call set_session_token with it.";
+  "Easiest fix: run the login_to_ditto tool — it opens a browser window, you sign in like normal, " +
+  "and the token is captured automatically. Manual alternative: open app.dittowords.com (logged in) → " +
+  "devtools → Network tab → any request to backend.dittowords.com → copy the 'Authorization' header " +
+  "value → call set_session_token with it.";
 
 export function setSessionToken(token) {
   sessionToken = normalize(token);
+  // Cache so a still-valid token survives server restarts (0600 — it's a credential).
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(TOKEN_CACHE, sessionToken, { mode: 0o600 });
+  } catch { /* cache is best-effort */ }
 }
 
 function normalize(token) {
@@ -37,8 +48,19 @@ function normalize(token) {
   return token.startsWith("Bearer ") ? token : `Bearer ${token}`;
 }
 
+function cachedToken() {
+  try {
+    const token = normalize(fs.readFileSync(TOKEN_CACHE, "utf8"));
+    const exp = tokenExpiry(token);
+    if (exp && exp < new Date()) return null; // stale — ignore
+    return token;
+  } catch {
+    return null;
+  }
+}
+
 export function getSessionToken() {
-  return sessionToken || normalize(process.env.DITTO_JWT);
+  return sessionToken || normalize(process.env.DITTO_JWT) || cachedToken();
 }
 
 // Decode the JWT payload (no verification — just to report expiry to the user).

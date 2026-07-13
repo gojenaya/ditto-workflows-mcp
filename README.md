@@ -41,7 +41,7 @@ Two Claude Code skills ship in `.claude/skills/`, encoding the standard playbook
 
 | Skill | What it does |
 |---|---|
-| `/ditto-handoff [figmaUrl] [projectId]` | Full Figma→Ditto handoff: paste a frame link → copy linked into the project → semantic developer IDs suggested and reviewed → optional promotion to FINAL |
+| `/ditto-handoff [figmaUrl] [projectId] [variantId]` | Full Figma→Ditto handoff: paste a frame link → copy linked into the project → semantic developer IDs suggested and reviewed → glossary-aware translation into a variant if one is mentioned ("…and add Arabic") → optional promotion to FINAL |
 | `/ditto-translate [projectId] [variantId]` | Full translation loop: refresh assets → read the glossary → translate in batches with self-review → write back as WIP → report written + skipped |
 | `/ditto-review [projectId] [variantId]` | Reviewer loop: present pending translations against their base text in batches; approve/edit/skip; edits and approvals become FINAL; refreshes the translation memory afterwards |
 

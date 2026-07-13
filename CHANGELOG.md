@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `figma_link_pass(projectId, figmaUrl)` — port of the ditto-handoff pipeline's link-pass, now headless: pulls the text nodes under a Figma frame ("Copy link to selection" URL required; whole-file blocked), connects texts that match existing items, creates new ones as WIP, and links matches to library components. Returns created items with auto-generated developer IDs and screen names for the rename step. Needs `FIGMA_API_KEY` (unofficial backend + Figma REST).
-- `/ditto-handoff` skill — the full flow from a pasted Figma link: link-pass → semantic developer-ID suggestions (screen-aware, reviewed by the user) → `rename_developer_id` → optional promotion of the touched items to FINAL.
+- `/ditto-handoff` skill — the full flow from a pasted Figma link: link-pass → semantic developer-ID suggestions (screen-aware, reviewed by the user) → `rename_developer_id` → glossary-aware translation into a variant when one is mentioned ("…and add Arabic"; translations land as WIP for `/ditto-review`) → optional promotion of the touched base items to FINAL.
 - Plugin: optional `figma_api_key` install prompt wired to `FIGMA_API_KEY`.
 
 ## [0.7.0] - 2026-07-13

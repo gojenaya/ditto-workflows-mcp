@@ -124,10 +124,20 @@ export async function renameDevId(projectMongoId, itemMongoId, developerId) {
   });
 }
 
-// Locate a project's mongo id headlessly: the dump's doc_ID group whose
-// developerIds overlap the project's public-API dev IDs. (The old pipeline
-// read the id off the web-app URL — no browser here.) Fails on an empty
-// project: with no items there is nothing to join on.
+// Map a project's public developer ID → mongo _id via the backend project
+// list (works even for empty projects, unlike the dump-join fallback below).
+export async function projectMongoIdByDevId(projectDevId) {
+  const projects = await backendFetch("/ditto-project");
+  const list = Array.isArray(projects) ? projects : projects.projects || [];
+  const hit = list.find((p) => p.developerId === projectDevId);
+  if (!hit?._id) {
+    throw new Error(`Project '${projectDevId}' not found in the backend project list.`);
+  }
+  return hit._id;
+}
+
+// Fallback: locate a project's mongo id from the dump's doc_ID group whose
+// developerIds overlap the project's public-API dev IDs. Needs ≥1 item.
 export function resolveProjectMongoId(dump, projectDevIds) {
   const overlap = new Map();
   for (const it of dump) {

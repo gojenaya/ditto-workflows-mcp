@@ -21,7 +21,7 @@ import { dittoFetch, dittoPatch } from "./ditto-api.js";
 import { getDefaultVariant, setDefaultVariant, DATA_DIR, CONFIG_PATH } from "./config.js";
 import {
   setSessionToken, getSessionToken, tokenExpiry, validateToken,
-  fetchWorkspaceDump, renameDevId, resolveProjectMongoId,
+  fetchWorkspaceDump, renameDevId, projectMongoIdByDevId,
   createTextItem, connectTextItems, fetchLibraryComponents, linkComponent,
   newObjectId, toRichText, TOKEN_HELP,
 } from "./ditto-backend.js";
@@ -160,7 +160,9 @@ async function patchSkippingUnknown(body) {
 const DYNAMIC_PATTERNS = [
   { pattern: /\b\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}\b/i, type: "date" },
   { pattern: /[$€£¥₹]\s*[\d,]+(\.\d{1,2})?/, type: "amount" },
-  { pattern: /\b(AED|USD|EUR|GBP|SAR|INR)\s*[\d,]+(\.\d{1,2})?/i, type: "amount" },
+  // Currency code before OR after the number: "AED 8.00" and "8.00 AED".
+  { pattern: /\b(AED|USD|EUR|GBP|SAR|INR|PKR|PHP)\s*[\d,]+(\.\d{1,2})?/i, type: "amount" },
+  { pattern: /\b[\d,]+(\.\d{1,2})?\s*(AED|USD|EUR|GBP|SAR|INR|PKR|PHP)\b/i, type: "amount" },
   { pattern: /\b\d+(\.\d+)?%/, type: "percentage" },
   { pattern: /[•*]{4}\s*\d{4}/, type: "card_last4" },
   { pattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/, type: "email" },
@@ -181,7 +183,7 @@ function detectDynamicTypes(text) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.8.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.8.1" });
 
 server.registerTool(
   "list_projects",
@@ -810,16 +812,10 @@ server.registerTool(
       };
     }
 
-    // 2. Project mongo id + existing items by normalised text.
-    const base = await fetchBaseItems(projectId);
-    if (!base.length) {
-      return {
-        content: [{ type: "text", text: `Project '${projectId}' has no text items yet — the backend mapping needs at least one. Add one item first (e.g. via the Ditto web app or write_translations on a base item).` }],
-        isError: true,
-      };
-    }
+    // 2. Project mongo id (direct backend lookup — works on empty projects) +
+    //    existing items by normalised text from the workspace dump.
+    const mongoProjectId = await projectMongoIdByDevId(projectId);
     const dump = await fetchWorkspaceDump();
-    const mongoProjectId = resolveProjectMongoId(dump, new Set(base.map((i) => i.id)));
     const projectItems = dump.filter((it) => it.doc_ID === mongoProjectId);
     const textToItems = new Map();
     for (const item of projectItems) {
@@ -974,17 +970,9 @@ server.registerTool(
     },
   },
   async ({ projectId, renames }) => {
-    // 1. Project dev IDs via the public API — used to locate the project's
-    //    mongo id in the backend dump and to catch 'to' collisions.
-    const base = await fetchBaseItems(projectId);
-    if (!base.length) {
-      return { content: [{ type: "text", text: `No text items found in project '${projectId}'.` }], isError: true };
-    }
-    const projectDevIds = new Set(base.map((i) => i.id));
-
-    // 2. Backend dump → project mongo id (dev-ID join; see ditto-backend.js).
+    // 1. Project mongo id via direct backend lookup, then its items from the dump.
+    const mongoProjectId = await projectMongoIdByDevId(projectId);
     const dump = await fetchWorkspaceDump();
-    const mongoProjectId = resolveProjectMongoId(dump, projectDevIds);
 
     // devId → mongo _id within the project
     const idMap = new Map();

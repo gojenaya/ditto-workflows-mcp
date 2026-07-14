@@ -5,6 +5,13 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-07-14
+
+### Fixed
+
+- `figma_link_pass` and `rename_developer_id` now resolve a project's internal ID via a direct backend project-list lookup (`GET /ditto-project`), so they work on **empty projects** — the old dev-ID-overlap join needed at least one existing item, which broke the first link-pass into a fresh project.
+- Variablise detection now catches **trailing-currency amounts** ("8.00 AED"), not just currency-first ("AED 8.00"); added PKR/PHP to the currency set.
+
 ## [0.8.0] - 2026-07-13
 
 ### Added

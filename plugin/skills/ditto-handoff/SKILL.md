@@ -5,7 +5,7 @@ description: Full Figma→Ditto handoff — paste a Figma frame link, its copy i
 
 # Figma → Ditto handoff
 
-One flow from a pasted Figma link to reviewed, semantically named text items: link-pass → semantic dev IDs → user review → variablise dynamic content → optional variant translation → optional FINAL promotion. Uses the unofficial backend tools (session login) plus the Figma REST API.
+One flow from a pasted Figma link to reviewed, semantically named text items: link-pass → semantic dev IDs → user review → variablise dynamic content → optional variant translation → stage everything at REVIEW (except already-FINAL). Uses the unofficial backend tools (session login) plus the Figma REST API.
 
 ## Arguments
 
@@ -31,12 +31,15 @@ One flow from a pasted Figma link to reviewed, semantically named text items: li
 7. **Translate into the variant — only if the user asked for one.** Follow the `/ditto-translate` playbook, scoped to this run's items:
    - Read `ditto://glossary/{variantId}` BEFORE translating (empty glossary → warn and confirm before proceeding).
    - Translate the touched items (created + connected that lack the variant — check with `list_untranslated` and intersect with this run's dev IDs, using post-rename IDs). Apply locked terms and voice rules; preserve `{{variables}}` and placeholders; keep UI-string lengths sensible. Self-review against the glossary before writing.
-   - `write_translations(batch, variantId, status: "WIP")` — translations always land as WIP for expert review, regardless of what happens to the base items in the next step.
-8. **Offer FINAL promotion:** show the final list (dev ID + text) of the items this run touched (created + connected), and ask whether to set their status to FINAL. Only on an explicit yes: `update_status(projectId, status: "FINAL", ids: [...])` with exactly those dev IDs (post-rename ones for renamed items). This promotes BASE items only — variant translations from step 7 stay WIP (`/ditto-review` promotes those). If the user declines, leave everything WIP and say so.
-9. **Tally:** connected / created / renamed / translated / promoted counts, plus anything skipped and why. If translations were written, suggest `/ditto-review` next; if no variant was requested but the workspace has one configured, mention `/ditto-translate` as a follow-up.
+   - `write_translations(batch, variantId, status: "WIP")` — write as WIP; the next step moves everything to REVIEW.
+8. **Stage everything for review.** Move all base items and all written variants to **REVIEW**, leaving anything already FINAL untouched (FINAL = expert-approved; never downgrade it). Use the status-list form of `update_status`, which structurally excludes FINAL:
+   - Base items: `update_status(projectId, status: "REVIEW", fromStatus: ["NONE","WIP","REVIEW"])`.
+   - Each variant translated this run: `update_status(projectId, status: "REVIEW", variantId, fromStatus: ["NONE","WIP","REVIEW"])`.
+   - This is automatic — the handoff's purpose is to stage the batch for review. Report how many base items and variants moved.
+9. **Tally:** connected / created / renamed / translated / moved-to-REVIEW counts, plus anything skipped and why. Suggest `/ditto-review` as the next step (an expert approves REVIEW → FINAL).
 
 ## Rules
 
 - The link-pass tool itself is idempotent-ish (re-running connects rather than duplicates), but never re-run it to "fix" something without telling the user.
-- Renames and FINAL promotion are user decisions — present, ask, then act.
+- Renames are a user decision — present, ask, then act. Status staging (→ REVIEW) is automatic, but never downgrades a FINAL item.
 - Keep the review tables compact; truncate long copy to ~60 chars.

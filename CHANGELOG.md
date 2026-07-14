@@ -5,6 +5,13 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-14
+
+### Changed
+
+- `update_status`: `fromStatus` now accepts a **list** of statuses and works for **variants** (with `variantId`), not just base items. This makes "stage everything for review without touching FINAL" a single call — `fromStatus: ["NONE","WIP","REVIEW"] → REVIEW` — since FINAL is simply excluded from the list.
+- `/ditto-handoff` final step changed from *offering* FINAL promotion to **automatically staging** the batch at REVIEW: all touched base items and written variants move to REVIEW, and any already-FINAL item is left untouched (never downgraded). Verified live: an `ar` variant with a pre-existing FINAL item kept it FINAL while 41 others moved to REVIEW.
+
 ## [0.8.1] - 2026-07-14
 
 ### Fixed

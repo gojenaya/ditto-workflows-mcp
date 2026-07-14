@@ -183,7 +183,7 @@ function detectDynamicTypes(text) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.8.1" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.9.0" });
 
 server.registerTool(
   "list_projects",
@@ -526,14 +526,19 @@ server.registerTool(
     description:
       "Set the workflow status of text items in a project. By default targets BASE items; pass variantId " +
       "(e.g. 'ar') to target that variant instead. Pass ids to scope to specific developer IDs, or omit ids " +
-      "and pass fromStatus to move everything at that status (e.g. all WIP → REVIEW). " +
+      "and pass fromStatus to move everything currently at that status (or any of a list of statuses) — e.g. " +
+      "fromStatus ['NONE','WIP','REVIEW'] with status 'REVIEW' stages everything for review WITHOUT touching " +
+      "FINAL items. fromStatus works for base items or a variant (with variantId). " +
       "IDs with no matching item/variant are skipped, not fatal.",
     inputSchema: {
       projectId: z.string().describe("Ditto project developer ID"),
       status: z.enum(["NONE", "WIP", "REVIEW", "FINAL"]).describe("Status to set"),
       ids: z.array(z.string()).optional().describe("Developer IDs to update (omit = derive from fromStatus)"),
-      fromStatus: z.enum(["NONE", "WIP", "REVIEW", "FINAL"]).optional()
-        .describe("When ids omitted: update all base items currently at this status"),
+      fromStatus: z.union([
+        z.enum(["NONE", "WIP", "REVIEW", "FINAL"]),
+        z.array(z.enum(["NONE", "WIP", "REVIEW", "FINAL"])),
+      ]).optional()
+        .describe("When ids omitted: update all items (base, or the variant if variantId is set) currently at this status or any status in this list"),
       variantId: z.string().optional().describe("Target this variant (e.g. 'ar') instead of base items"),
     },
   },
@@ -543,9 +548,19 @@ server.registerTool(
       if (!fromStatus) {
         return { content: [{ type: "text", text: "Provide either ids or fromStatus." }], isError: true };
       }
-      const filter = JSON.stringify({ projects: [{ id: projectId }], statuses: [fromStatus] });
+      const froms = Array.isArray(fromStatus) ? fromStatus : [fromStatus];
+      // For a variant, fetch base+variant and pick variant rows at those statuses;
+      // otherwise base rows at those statuses.
+      const filter = variantId
+        ? JSON.stringify({ projects: [{ id: projectId }], variants: [{ id: variantId }, { id: "base" }] })
+        : JSON.stringify({ projects: [{ id: projectId }], statuses: froms });
       const items = await dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`);
-      targetIds = items.filter((i) => i.variantId === null && i.pluralForm === null).map((i) => i.id);
+      targetIds = items
+        .filter((i) =>
+          i.pluralForm === null &&
+          (variantId ? i.variantId === variantId : i.variantId === null) &&
+          froms.includes(i.status))
+        .map((i) => i.id);
     }
     if (!targetIds.length) {
       return { content: [{ type: "text", text: "No matching items to update." }] };

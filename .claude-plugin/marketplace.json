@@ -7,7 +7,7 @@
       "name": "ditto-workflows",
       "source": "./plugin",
       "description": "MCP tools for Ditto (projects, translate, review, variablise, components, search) bundled with the /ditto-translate and /ditto-review skills. Installs the server via npx and prompts for your Ditto API key.",
-      "version": "0.9.0",
+      "version": "0.10.0",
       "license": "MIT",
       "keywords": ["ditto", "dittowords", "localization", "translation"]
     }

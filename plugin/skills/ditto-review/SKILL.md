@@ -1,17 +1,27 @@
 ---
 name: ditto-review
-description: Review pending Ditto translations for a project — present each translation with its base text, let the reviewer approve/edit/skip, then push results back (edits and approvals become FINAL). Use when the user wants to review, QA, or approve translations in Ditto.
+description: Review pending Ditto translations for a project — either interactively in chat or by handing a human translator a Markdown review sheet — then push results back (edits and approvals become FINAL). Use when the user wants to review, QA, approve, or hand off translations for review in Ditto.
 ---
 
 # Ditto translation review loop
 
-Interactive review of a project's pending translations using the ditto-workflows-mcp tools.
+Review a project's pending translations using the ditto-workflows-mcp tools. Two modes:
+
+- **A — Translator review sheet (for a human expert):** when the user wants a *translator* to review (not review in chat themselves), export a Markdown sheet the translator edits — flag concerns, write optimal translations — then apply it back. Best when the reviewer is a native speaker who isn't driving Claude.
+- **B — Interactive in chat:** Claude presents each translation for the user to approve/edit/skip live.
 
 ## Arguments
 
 `/ditto-review [projectId] [variantId]` — both optional. If projectId is missing, call `list_projects` and ask the user to pick. If variantId is missing, the tools use the configured default variant.
 
-## Procedure
+## Mode A — translator review sheet
+
+1. `export_review_sheet(projectId, variantId?, statuses=['REVIEW'])` — writes a Markdown sheet (base · current translation · Verdict · editable Suggested · Notes) and returns its path + content. Give the translator the path (or paste the sheet in chat).
+2. The translator edits each row: `approve` to keep, or `edit` + rewrite the Suggested cell; blank/`skip` to defer; Notes to flag. `{{variables}}` and placeholders stay intact.
+3. `apply_review_sheet(projectId, variantId?, path?)` — pushes it back: edited rows written at FINAL, approvals promoted to FINAL, deferred rows left in REVIEW. Report the returned tally (edited / approved / deferred).
+4. Then do step "Refresh the translation memory" below.
+
+## Mode B — interactive review, procedure
 
 1. **Fetch the queue:** call `list_for_review(projectId, variantId?)` (default statuses WIP + REVIEW). If count is 0, say so and stop.
 2. **Read the glossary first:** read the `ditto://glossary/{variantId}` resource so you can flag glossary/voice-rule violations during review — but the reviewer's judgment always wins.

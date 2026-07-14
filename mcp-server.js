@@ -183,7 +183,7 @@ function detectDynamicTypes(text) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.9.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.10.0" });
 
 server.registerTool(
   "list_projects",
@@ -515,6 +515,146 @@ server.registerTool(
           ),
         },
       ],
+    };
+  },
+);
+
+// ─── TRANSLATOR REVIEW SHEET (md round-trip) ─────────────────────────────────
+// A human translator reviews the items in REVIEW, flags concerns, and writes
+// optimal translations in a markdown sheet — then apply_review_sheet pushes
+// their calls back (edits FINAL, approvals FINAL, flagged/blank left in REVIEW).
+
+const REVIEW_DIR = path.join(DATA_DIR, "review-sheets");
+const escCell = (s) => (s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
+const unescCell = (s) =>
+  s.replace(/<br>/g, "\n").replace(/\\\|/g, "|").replace(/\\\\/g, "\\").trim();
+// Split a table row on unescaped pipes, dropping the outer borders.
+function splitRow(line) {
+  const inner = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return inner.split(/(?<!\\)\|/).map(unescCell);
+}
+
+server.registerTool(
+  "export_review_sheet",
+  {
+    title: "Export a translator review sheet",
+    description:
+      "Write a Markdown review sheet of a variant's translations at the given statuses (default REVIEW) for a " +
+      "human translator: each row has the base (source) text, the current translation, a Verdict cell, an " +
+      "editable Suggested cell, and Notes. The translator sets Verdict to 'approve' (keep as-is) or 'edit' " +
+      "(and rewrites the Suggested cell), or leaves it blank/'skip' to defer; Notes is for flags. Returns the " +
+      "file path and the sheet inline (usable directly in chat). Feed the edited sheet back via apply_review_sheet.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID"),
+      variantId: z.string().optional().describe("Variant to review (default: configured default variant)"),
+      statuses: z.array(z.enum(["NONE", "WIP", "REVIEW", "FINAL"])).default(["REVIEW"])
+        .describe("Variant statuses to include (default: REVIEW)"),
+    },
+  },
+  async ({ projectId, variantId, statuses }) => {
+    variantId = requireVariant(variantId);
+    const filter = JSON.stringify({ projects: [{ id: projectId }], variants: [{ id: variantId }, { id: "base" }] });
+    const all = await dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`);
+    const baseText = new Map();
+    for (const i of all) if (i.variantId === null && i.pluralForm === null) baseText.set(i.id, i.text);
+    const items = all
+      .filter((i) => i.variantId === variantId && i.pluralForm === null && statuses.includes(i.status) && baseText.has(i.id))
+      .map((i) => ({ id: i.id, base: baseText.get(i.id), translation: i.text }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+
+    const md = [
+      `# Translation review — ${projectId} / ${variantId}`,
+      "",
+      `${items.length} item(s) at status: ${statuses.join(", ")}.`,
+      "",
+      "**How to review:** in each row set **Verdict** to `approve` (keep the current translation) or `edit`",
+      "(then rewrite the **Suggested** cell with the optimal translation). Leave Verdict blank or `skip` to",
+      "defer a row (it stays in REVIEW). Use **Notes** to flag concerns. Keep `{{variables}}` and placeholders",
+      "intact. When done, run apply_review_sheet for this project + variant (or hand the file back to Claude).",
+      "",
+      `| # | dev_id | Base (source) | Current (${variantId}) | Verdict | Suggested (${variantId}) | Notes |`,
+      "|---|--------|---------------|------------------------|---------|--------------------------|-------|",
+      ...items.map((it, n) =>
+        `| ${n + 1} | ${escCell(it.id)} | ${escCell(it.base)} | ${escCell(it.translation)} | approve | ${escCell(it.translation)} |  |`),
+      "",
+    ].join("\n");
+
+    fs.mkdirSync(REVIEW_DIR, { recursive: true });
+    const file = path.join(REVIEW_DIR, `${projectId}-${variantId}.md`);
+    fs.writeFileSync(file, md);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ projectId, variantId, statuses, count: items.length, path: file }, null, 2) + "\n\n" + md }],
+    };
+  },
+);
+
+server.registerTool(
+  "apply_review_sheet",
+  {
+    title: "Apply a translator review sheet",
+    description:
+      "Parse a review sheet edited by a translator (from export_review_sheet) and push the verdicts to Ditto: " +
+      "rows whose Suggested differs from Current (or Verdict is 'edit') are written as that variant at status " +
+      "FINAL; rows marked 'approve' unchanged are promoted to FINAL; rows left blank/'skip' stay in REVIEW. " +
+      "Pass the file path, or omit it to use the default location for this project+variant. Returns a tally.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID"),
+      variantId: z.string().optional().describe("Variant (default: configured default variant)"),
+      path: z.string().optional().describe("Path to the edited sheet (default: the export location for this project+variant)"),
+    },
+  },
+  async ({ projectId, variantId, path: sheetPath }) => {
+    variantId = requireVariant(variantId);
+    const file = sheetPath || path.join(REVIEW_DIR, `${projectId}-${variantId}.md`);
+    let md;
+    try { md = fs.readFileSync(file, "utf8"); }
+    catch { return { content: [{ type: "text", text: `No review sheet found at ${file}. Run export_review_sheet first.` }], isError: true }; }
+
+    const edits = [];      // {id, text} → write FINAL
+    const approvals = [];   // id → promote FINAL
+    const deferred = [];    // {id, reason}
+    for (const line of md.split("\n")) {
+      if (!line.trim().startsWith("|")) continue;
+      const c = splitRow(line);
+      if (c.length < 6) continue;
+      const [num, id, , current, verdict, suggested] = c;
+      if (id === "dev_id" || /^-+$/.test(id) || !id) continue; // header/separator
+      const v = (verdict || "").toLowerCase();
+      if (v === "skip" || v === "") { deferred.push({ id, reason: "no verdict" }); continue; }
+      if (v === "edit" || (suggested && suggested !== current)) {
+        if (!suggested) { deferred.push({ id, reason: "edit verdict but empty Suggested" }); continue; }
+        edits.push({ id, text: suggested });
+      } else if (v === "approve") {
+        approvals.push(id);
+      } else {
+        deferred.push({ id, reason: `unrecognised verdict '${verdict}'` });
+      }
+    }
+
+    if (edits.length) {
+      await dittoPatch({
+        variantId,
+        forceVariantCreation: true,
+        updates: edits.map((e) => ({ developerId: e.id, text: e.text, status: "FINAL" })),
+      });
+    }
+    let promoted = 0;
+    if (approvals.length) {
+      const r = await patchSkippingUnknown({
+        variantId,
+        updates: approvals.map((id) => ({ developerId: id, status: "FINAL", projectId })),
+      });
+      promoted = r.updated;
+    }
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          projectId, variantId,
+          edited: edits.length, approved: promoted, deferred: deferred.length,
+          deferredItems: deferred,
+        }, null, 2),
+      }],
     };
   },
 );

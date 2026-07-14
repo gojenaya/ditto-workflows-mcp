@@ -13,6 +13,8 @@ Works with any Ditto workspace — auth is your own workspace API key.
 | `list_untranslated(projectId, variantId?)` | Base items missing the variant |
 | `write_translations(translations[], variantId?, status='WIP')` | Write variants back (creates if missing) |
 | `list_for_review(projectId, variantId?, statuses=['WIP','REVIEW'])` | Pending translations joined with their base text — drive an approve/edit/skip review loop; edits go back via `write_translations` at FINAL, approvals via `update_status` |
+| `export_review_sheet(projectId, variantId?, statuses=['REVIEW'])` | Write a Markdown review sheet (base · current · verdict · suggested · notes) for a human translator to edit — returned inline too, so it works as a file or in chat |
+| `apply_review_sheet(projectId, variantId?, path?)` | Parse the translator's edited sheet back into Ditto: edits written at FINAL, approvals promoted to FINAL, flagged/blank left in REVIEW |
 | `update_status(projectId, status, ids?/fromStatus?, variantId?)` | Set status on base items or a variant; unknown IDs skipped |
 | `update_text(projectId, updates[], status?)` | Rewrite base item text (copy edits, `{{variable}}` replacements); unknown IDs skipped |
 | `list_variablisation_candidates(projectId)` | Base items with hardcoded dynamic values (dates, amounts, %, card last-4, emails) + the workspace's variables — Claude suggests `{{variable}}` replacements, applied via `update_text` |

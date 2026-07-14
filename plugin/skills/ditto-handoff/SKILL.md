@@ -5,7 +5,7 @@ description: Full Figma→Ditto handoff — paste a Figma frame link, its copy i
 
 # Figma → Ditto handoff
 
-One flow from a pasted Figma link to reviewed, semantically named text items: link-pass → semantic dev IDs → user review → optional variant translation → optional FINAL promotion. Uses the unofficial backend tools (session login) plus the Figma REST API.
+One flow from a pasted Figma link to reviewed, semantically named text items: link-pass → semantic dev IDs → user review → variablise dynamic content → optional variant translation → optional FINAL promotion. Uses the unofficial backend tools (session login) plus the Figma REST API.
 
 ## Arguments
 
@@ -24,12 +24,16 @@ One flow from a pasted Figma link to reviewed, semantically named text items: li
    - Use the **screen name** to disambiguate — the same text on two screens should get distinct, screen-prefixed IDs. Never suggest the same ID twice.
 4. **Present the suggestions for review** as a numbered table (current ID → suggested ID, with the text and screen). The user approves all, picks numbers, edits, or skips — interpret flexibly. Never rename anything the user didn't approve.
 5. **Apply approved renames** with `rename_developer_id(projectId, renames)` — one call. Report any skipped/failed entries from the result.
-6. **Translate into the variant — only if the user asked for one.** Follow the `/ditto-translate` playbook, scoped to this run's items:
+6. **Variablise dynamic content:** call `list_variablisation_candidates(projectId)` and keep only candidates from this run's items (post-rename IDs). Freshly imported Figma copy is where hardcoded sample values concentrate — dates, amounts, card last-4, emails.
+   - Suggest `{{variable}}` replacements per that tool's rules (semantically specific names; reuse an existing workspace variable only when it genuinely fits; static text untouched). For items whose text is *entirely* a sample value (e.g. "4,000,000.00"), suggest replacing the whole text with the placeholder.
+   - Present for approval in the same numbered-table style; apply approved ones via `update_text(projectId, updates)`.
+   - Tell the user plainly: placeholders land as literal `{{name}}` text — the public API cannot link workspace variables, so listed-but-missing variables must be created and linked in the Ditto web app. Include the needed-variable list in the report.
+7. **Translate into the variant — only if the user asked for one.** Follow the `/ditto-translate` playbook, scoped to this run's items:
    - Read `ditto://glossary/{variantId}` BEFORE translating (empty glossary → warn and confirm before proceeding).
    - Translate the touched items (created + connected that lack the variant — check with `list_untranslated` and intersect with this run's dev IDs, using post-rename IDs). Apply locked terms and voice rules; preserve `{{variables}}` and placeholders; keep UI-string lengths sensible. Self-review against the glossary before writing.
    - `write_translations(batch, variantId, status: "WIP")` — translations always land as WIP for expert review, regardless of what happens to the base items in the next step.
-7. **Offer FINAL promotion:** show the final list (dev ID + text) of the items this run touched (created + connected), and ask whether to set their status to FINAL. Only on an explicit yes: `update_status(projectId, status: "FINAL", ids: [...])` with exactly those dev IDs (post-rename ones for renamed items). This promotes BASE items only — variant translations from step 6 stay WIP (`/ditto-review` promotes those). If the user declines, leave everything WIP and say so.
-8. **Tally:** connected / created / renamed / translated / promoted counts, plus anything skipped and why. If translations were written, suggest `/ditto-review` next; if no variant was requested but the workspace has one configured, mention `/ditto-translate` as a follow-up.
+8. **Offer FINAL promotion:** show the final list (dev ID + text) of the items this run touched (created + connected), and ask whether to set their status to FINAL. Only on an explicit yes: `update_status(projectId, status: "FINAL", ids: [...])` with exactly those dev IDs (post-rename ones for renamed items). This promotes BASE items only — variant translations from step 7 stay WIP (`/ditto-review` promotes those). If the user declines, leave everything WIP and say so.
+9. **Tally:** connected / created / renamed / translated / promoted counts, plus anything skipped and why. If translations were written, suggest `/ditto-review` next; if no variant was requested but the workspace has one configured, mention `/ditto-translate` as a follow-up.
 
 ## Rules
 

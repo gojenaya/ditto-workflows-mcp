@@ -5,6 +5,13 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-14
+
+### Changed
+
+- **Translation memory reworked to be a reusable reference.** `refresh_translation_assets` now groups FINAL translations by source text: identical source→translation pairs are collapsed (with an occurrence count), and any source with more than one FINAL translation is flagged as a **conflict** listing each variant's **dev IDs + project IDs** to confirm and re-align. Output is a clean Markdown **table** (Memory + Conflicts sections) instead of a bullet list; the tool's response is capped/summarised so it stays small even with hundreds of conflicts.
+- `/ditto-translate` (and the handoff's translation step) now **reference the memory first**: exact source matches reuse the approved translation verbatim, similar sources mirror its wording, and only genuinely-new copy is translated from scratch. Verified live: with the current workspace memory, a translation pass would reuse 98 Arabic / 34 Hindi existing translations across sample projects instead of re-inventing them.
+
 ## [0.10.0] - 2026-07-14
 
 ### Added

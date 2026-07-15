@@ -1,15 +1,16 @@
 # ditto-workflows-mcp
 
-An MCP server for [Ditto](https://dittowords.com) — drive copy workflows from Claude: list projects, find untranslated strings, write glossary-aware translations (Claude translates — no DeepL), and update workflow statuses.
+An MCP server for [Ditto](https://dittowords.com) — drive copy workflows from Claude: find and write glossary-aware translations (Claude translates — no DeepL), review them with a human translator, build a workspace translation memory, hand a Figma frame off into Ditto end-to-end, variablise hardcoded values, and manage workflow statuses.
 
-Works with any Ditto workspace — auth is your own workspace API key.
+Works with any Ditto workspace — auth is your own workspace API key. A few extra tools (Figma link-pass, dev-ID rename) use your browser session for operations the public API doesn't expose.
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
 | `list_projects` | Projects in the workspace (id + name) |
-| `set_default_variant(variantId)` | Set the default variant once (e.g. `ar`, `fr`); saved to a gitignored `.ditto-config.json` |
+| `set_default_variant(variantId)` | Set the default variant once (e.g. `ar`, `fr`); saved to `~/.ditto-workflows-mcp/config.json` |
+| `set_excluded_projects(projectIds[])` | Test/sandbox projects to skip when building the translation memory (never seed real translations from them) |
 | `list_untranslated(projectId, variantId?)` | Base items missing the variant |
 | `write_translations(translations[], variantId?, status='WIP')` | Write variants back (creates if missing) |
 | `list_for_review(projectId, variantId?, statuses=['WIP','REVIEW'])` | Pending translations joined with their base text — drive an approve/edit/skip review loop; edits go back via `write_translations` at FINAL, approvals via `update_status` |
@@ -20,7 +21,7 @@ Works with any Ditto workspace — auth is your own workspace API key.
 | `list_variablisation_candidates(projectId)` | Base items with hardcoded dynamic values (dates, amounts, %, card last-4, emails) + the workspace's variables — Claude suggests `{{variable}}` replacements, applied via `update_text` |
 | `list_components(folderId?)` | The workspace's component library (shared strings) — check before writing new copy |
 | `search_text(query, projectId?, limit=50)` | Substring search over base items + components — find existing copy to reuse, or locate where a string lives |
-| `refresh_translation_assets(variantId?)` | Pull all FINAL (expert-approved) base→variant pairs workspace-wide into a local translation-memory file — raw material for distilling a glossary |
+| `refresh_translation_assets(variantId?)` | Build the translation memory from FINAL (expert-approved) translations workspace-wide — one clean table of source→translation to reuse before translating; sources with conflicting FINAL translations are held out into a separate `translation-conflicts.md` (with dev IDs + projects) to resolve. Skips configured test/sandbox projects and `[XX-TODO]` placeholders |
 
 ### Unofficial backend tools (session login)
 
@@ -43,7 +44,7 @@ Two Claude Code skills ship in `.claude/skills/`, encoding the standard playbook
 
 | Skill | What it does |
 |---|---|
-| `/ditto-handoff [figmaUrl] [projectId] [variantId]` | Full Figma→Ditto handoff: paste a frame link → copy linked into the project → semantic developer IDs suggested and reviewed → glossary-aware translation into a variant if one is mentioned ("…and add Arabic") → optional promotion to FINAL |
+| `/ditto-handoff [figmaUrl] [projectId] [variantId]` | Full Figma→Ditto handoff, autonomous end-to-end: paste a frame link → copy linked into the project → semantic developer IDs applied → hardcoded values variablised → glossary-aware translation into a variant if one is mentioned ("…and add Arabic") → the whole batch staged at REVIEW. Nothing goes FINAL automatically — the human review happens after |
 | `/ditto-translate [projectId] [variantId]` | Full translation loop: refresh assets → read the glossary → translate in batches with self-review → write back as WIP → report written + skipped |
 | `/ditto-review [projectId] [variantId]` | Reviewer loop: present pending translations against their base text in batches; approve/edit/skip; edits and approvals become FINAL; refreshes the translation memory afterwards |
 
@@ -123,5 +124,5 @@ Restart your client, run `/mcp` — `ditto-workflows` should show connected. The
 ## Notes
 
 - Every GET carries a cache-buster: Ditto's CDN caches responses by exact URL and ignores `no-cache` headers, serving stale data after writes.
-- `{{variable}}` placeholders written via the API land as literal text — the public API can't link workspace variables to items (verified: `variableIds` in a PATCH is silently ignored). Linking, variable creation, and dev-ID renames happen in the Ditto web app.
-- v1 is public-API only. Browser-session operations (Figma link-pass, dev-ID renames) live in the companion pipeline repo and may join later.
+- `{{variable}}` placeholders written via the API land as literal text — the public API can't link workspace variables to items (verified: `variableIds` in a PATCH is silently ignored). Linking and variable *creation* still happen in the Ditto web app; the copy shape is set here.
+- The unofficial backend tools (`login_to_ditto`, `figma_link_pass`, `rename_developer_id`) replay Ditto's internal web-app API — unversioned and subject to change. They live in a separate module (`ditto-backend.js`) so a breakage there never affects the public-API tools.

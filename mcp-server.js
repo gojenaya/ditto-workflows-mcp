@@ -181,9 +181,43 @@ function detectDynamicTypes(text) {
   return [...types];
 }
 
+// ─── SHARED MARKDOWN TABLE STYLE ─────────────────────────────────────────────
+// One table style for every generated .md (memory, conflicts, review sheets) so
+// the output looks identical no matter which tool or client produced it.
+const MD_WRAP = 60;
+// Escape a value for a table cell (pipes + newlines).
+const mdCell = (s) => (s ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
+// Wrap long text at word boundaries with <br> so a Markdown viewer keeps the
+// column at a fixed width and flows long text onto extra lines; short entries
+// stay on one line. NOTE: only for display cells — never for a cell that round-
+// trips back to Ditto (the <br> would corrupt it).
+function mdWrap(s) {
+  s = mdCell(s);
+  if (s.length <= MD_WRAP) return s;
+  const lines = [];
+  let cur = "";
+  for (const word of s.split(" ")) {
+    if (cur && (cur + " " + word).length > MD_WRAP) { lines.push(cur); cur = word; }
+    else cur = cur ? `${cur} ${word}` : word;
+  }
+  if (cur) lines.push(cur);
+  return lines.join("<br>");
+}
+// Build a Markdown table. wrapCols = indices whose long text should wrap; all
+// other columns are escaped but left intact (short ids, or round-trip cells).
+function mdTable(headers, rows, wrapCols = []) {
+  const w = new Set(wrapCols);
+  const fmt = (vals) => `| ${vals.map((v, i) => (w.has(i) ? mdWrap(v) : mdCell(v))).join(" | ")} |`;
+  return [
+    `| ${headers.join(" | ")} |`,
+    `| ${headers.map(() => "---").join(" | ")} |`,
+    ...rows.map(fmt),
+  ];
+}
+
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.2" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.3" });
 
 server.registerTool(
   "list_projects",
@@ -525,7 +559,6 @@ server.registerTool(
 // their calls back (edits FINAL, approvals FINAL, flagged/blank left in REVIEW).
 
 const REVIEW_DIR = path.join(DATA_DIR, "review-sheets");
-const escCell = (s) => (s ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
 const unescCell = (s) =>
   s.replace(/<br>/g, "\n").replace(/\\\|/g, "|").replace(/\\\\/g, "\\").trim();
 // Split a table row on unescaped pipes, dropping the outer borders.
@@ -562,6 +595,12 @@ server.registerTool(
       .map((i) => ({ id: i.id, base: baseText.get(i.id), translation: i.text }))
       .sort((a, b) => a.id.localeCompare(b.id));
 
+    // Same table style as the memory/conflict files (shared mdTable). Only the
+    // read-only Source column wraps; Current and Suggested are left intact so the
+    // Suggested cell round-trips back to Ditto exactly and the approve/edit
+    // comparison stays reliable.
+    const headers = ["#", "dev_id", "Base (source)", `Current (${variantId})`, "Verdict", `Suggested (${variantId})`, "Notes"];
+    const rows = items.map((it, n) => [String(n + 1), it.id, it.base, it.translation, "approve", it.translation, ""]);
     const md = [
       `# Translation review — ${projectId} / ${variantId}`,
       "",
@@ -572,10 +611,7 @@ server.registerTool(
       "defer a row (it stays in REVIEW). Use **Notes** to flag concerns. Keep `{{variables}}` and placeholders",
       "intact. When done, run apply_review_sheet for this project + variant (or hand the file back to Claude).",
       "",
-      `| # | dev_id | Base (source) | Current (${variantId}) | Verdict | Suggested (${variantId}) | Notes |`,
-      "|---|--------|---------------|------------------------|---------|--------------------------|-------|",
-      ...items.map((it, n) =>
-        `| ${n + 1} | ${escCell(it.id)} | ${escCell(it.base)} | ${escCell(it.translation)} | approve | ${escCell(it.translation)} |  |`),
+      ...mdTable(headers, rows, [2]),
       "",
     ].join("\n");
 
@@ -781,24 +817,6 @@ server.registerTool(
     memory.sort((a, b) => a.source.localeCompare(b.source));
     conflicts.sort((a, b) => a.source.localeCompare(b.source));
 
-    const cell = (s) => (s ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
-    // Pad each column to its widest cell, but CAP the width so a single long
-    // sentence doesn't stretch every row. Short cells pad to the cap and stay on
-    // one line; cells longer than the cap simply overrun (they wrap to multiple
-    // lines in a rendered/word-wrapped view). Translation is the last column, so
-    // RTL text never reorders a trailing cell.
-    const COL_CAP = 48;
-    function table(headers, rows) {
-      const all = [headers, ...rows];
-      const widths = headers.map((_, i) => Math.min(COL_CAP, Math.max(3, ...all.map((r) => cell(r[i]).length))));
-      const fmt = (vals) => `| ${vals.map((v, i) => cell(v).padEnd(widths[i])).join(" | ")} |`;
-      return [
-        fmt(headers),
-        `| ${widths.map((w) => "-".repeat(w)).join(" | ")} |`,
-        ...rows.map(fmt),
-      ];
-    }
-
     const memDir = path.join(ASSETS, variantId);
     fs.mkdirSync(memDir, { recursive: true });
     const memFile = path.join(memDir, "translation-memory.md");
@@ -811,17 +829,19 @@ server.registerTool(
       "",
       `## Memory — ${memory.length} source text(s)`,
       "",
-      ...table(["Source", variantId], memory.map((m) => [m.source, m.translation])),
+      ...mdTable(["Source", variantId], memory.map((m) => [m.source, m.translation]), [0, 1]),
       "",
     ].join("\n"));
 
     // Conflicts go in their own file (not the memory), for the user to resolve.
+    // One row per distinct translation of a conflicting source (dev@project refs
+    // collapsed), so each source occupies a few lines instead of dozens.
     const conflictFile = path.join(memDir, "translation-conflicts.md");
     if (conflicts.length) {
       const rows = [];
       for (const c of conflicts) {
         for (const opt of c.options) {
-          for (const ref of opt.refs) rows.push([c.source, ref.id, ref.projectId, opt.translation]);
+          rows.push([c.source, opt.refs.map((r) => `${r.id}@${r.projectId}`).join(", "), opt.translation]);
         }
       }
       fs.writeFileSync(conflictFile, [
@@ -830,8 +850,9 @@ server.registerTool(
         `${conflicts.length} source text(s) have more than one FINAL translation (test/sandbox projects excluded).`,
         "These are kept OUT of the translation memory until resolved. Pick the correct translation and re-align",
         "the others (edit + re-approve via the review tools); the next refresh moves resolved ones into memory.",
+        "One row per distinct translation; 'used by' lists the dev IDs @ projects.",
         "",
-        ...table(["Source", "dev_id", "project", variantId], rows),
+        ...mdTable(["Source", "used by (dev@project)", variantId], rows, [0, 1, 2]),
         "",
       ].join("\n"));
     } else {

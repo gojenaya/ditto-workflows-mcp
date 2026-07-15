@@ -5,6 +5,13 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3] - 2026-07-15
+
+### Changed
+
+- One shared Markdown table style across every generated file (memory, conflicts, review sheets) so output is identical regardless of which tool/client produced it. Long cells wrap with <br> (fixed-width columns in a viewer; short entries stay one line) instead of char-padding, which could not align proportional Arabic/emoji.
+- Conflicts file: one row per distinct translation with dev@project refs collapsed (was one row per ref — the {{_}} case went from ~90 rows to a handful).
+
 ## [0.12.2] - 2026-07-15
 
 ### Changed

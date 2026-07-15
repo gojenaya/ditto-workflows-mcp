@@ -183,7 +183,7 @@ function detectDynamicTypes(text) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.1" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.2" });
 
 server.registerTool(
   "list_projects",
@@ -782,13 +782,15 @@ server.registerTool(
     conflicts.sort((a, b) => a.source.localeCompare(b.source));
 
     const cell = (s) => (s ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
-    // Pad EVERY column to its widest cell (by character count) so all pipes line
-    // up in the raw file. The translation is the last column, so RTL text doesn't
-    // reorder any trailing cell. (Bidi/glyph widths mean visual alignment of the
-    // Arabic column itself can't be guaranteed in every editor, but the borders do.)
+    // Pad each column to its widest cell, but CAP the width so a single long
+    // sentence doesn't stretch every row. Short cells pad to the cap and stay on
+    // one line; cells longer than the cap simply overrun (they wrap to multiple
+    // lines in a rendered/word-wrapped view). Translation is the last column, so
+    // RTL text never reorders a trailing cell.
+    const COL_CAP = 48;
     function table(headers, rows) {
       const all = [headers, ...rows];
-      const widths = headers.map((_, i) => Math.max(3, ...all.map((r) => cell(r[i]).length)));
+      const widths = headers.map((_, i) => Math.min(COL_CAP, Math.max(3, ...all.map((r) => cell(r[i]).length))));
       const fmt = (vals) => `| ${vals.map((v, i) => cell(v).padEnd(widths[i])).join(" | ")} |`;
       return [
         fmt(headers),

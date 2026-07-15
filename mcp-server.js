@@ -183,7 +183,7 @@ function detectDynamicTypes(text) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.1" });
 
 server.registerTool(
   "list_projects",
@@ -758,6 +758,10 @@ server.registerTool(
     for (const i of all) {
       if (i.variantId !== variantId || i.status !== "FINAL" || i.pluralForm !== null) continue;
       if (excluded.has(i.projectId)) continue;
+      // Skip non-translations even at FINAL: empty, or an untranslated placeholder
+      // like "[AR-TODO] ..." / "[EN-TODO] ..." (Ditto's not-yet-translated marker).
+      if (!i.text || !i.text.trim()) continue;
+      if (/^\s*\[[a-z]{2,3}-todo\]/i.test(i.text)) continue;
       const source = baseText.get(i.id);
       if (source === undefined) continue;
       if (!groups.has(source)) groups.set(source, new Map());
@@ -778,17 +782,17 @@ server.registerTool(
     conflicts.sort((a, b) => a.source.localeCompare(b.source));
 
     const cell = (s) => (s ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
-    // Pad a column to its widest value so raw rows line up. RTL (Arabic) text is
-    // always the LAST column, so nothing after it gets visually reordered.
-    const pad = (rows, i) => Math.max(0, ...rows.map((r) => cell(r[i]).length));
+    // Pad EVERY column to its widest cell (by character count) so all pipes line
+    // up in the raw file. The translation is the last column, so RTL text doesn't
+    // reorder any trailing cell. (Bidi/glyph widths mean visual alignment of the
+    // Arabic column itself can't be guaranteed in every editor, but the borders do.)
     function table(headers, rows) {
-      const widths = headers.map((h, i) => Math.max(h.length, pad(rows, i)));
-      // Don't pad the final column (free-flowing / RTL) or very wide columns.
-      const w = (i) => (i === headers.length - 1 || widths[i] > 60 ? 0 : widths[i]);
-      const fmt = (vals) => `| ${vals.map((v, i) => cell(v).padEnd(w(i))).join(" | ")} |`;
+      const all = [headers, ...rows];
+      const widths = headers.map((_, i) => Math.max(3, ...all.map((r) => cell(r[i]).length)));
+      const fmt = (vals) => `| ${vals.map((v, i) => cell(v).padEnd(widths[i])).join(" | ")} |`;
       return [
         fmt(headers),
-        `| ${headers.map((h, i) => "-".repeat(Math.max(3, w(i) || h.length))).join(" | ")} |`,
+        `| ${widths.map((w) => "-".repeat(w)).join(" | ")} |`,
         ...rows.map(fmt),
       ];
     }

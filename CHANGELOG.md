@@ -5,6 +5,13 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-07-15
+
+### Changed
+
+- `refresh_translation_assets` now skips untranslated placeholders even at FINAL status — a translation like `[AR-TODO] …` / `[EN-TODO] …` (Ditto's not-yet-translated marker) or an empty string never enters the memory or the conflicts.
+- Table columns are fully padded (every column, including the last) so borders align in the raw Markdown file.
+
 ## [0.12.0] - 2026-07-15
 
 ### Added

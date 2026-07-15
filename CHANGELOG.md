@@ -5,6 +5,12 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.5] - 2026-07-15
+
+### Changed
+
+- Review sheet restructured: narrower columns (cap 40) so rows fit one line and only long sentences overflow; **Verdict moved to the last column as A/N** (A = approve/keep, N = not approved → put the fix in Suggested; blank = defer). apply_review_sheet parses A/N accordingly.
+
 ## [0.12.4] - 2026-07-15
 
 ### Changed

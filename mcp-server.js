@@ -209,10 +209,10 @@ function mdWrap(s) {
 // the exception — in a wrapCols column it wraps onto extra lines, otherwise it
 // simply overruns that one row. (padEnd counts characters; proportional Arabic/
 // emoji still can't be pixel-aligned, but Latin/Devanagari line up well.)
-function mdTable(headers, rows, wrapCols = []) {
+function mdTable(headers, rows, wrapCols = [], maxWidth = MD_WRAP) {
   const w = new Set(wrapCols);
   const all = [headers, ...rows];
-  const widths = headers.map((_, i) => Math.min(MD_WRAP, Math.max(3, ...all.map((r) => mdCell(r[i]).length))));
+  const widths = headers.map((_, i) => Math.min(maxWidth, Math.max(3, ...all.map((r) => mdCell(r[i]).length))));
   const fmtCell = (v, i) => {
     const s = mdCell(v);
     if (w.has(i) && s.length > widths[i]) return mdWrap(s); // long → wrap, no pad
@@ -228,7 +228,7 @@ function mdTable(headers, rows, wrapCols = []) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.4" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.5" });
 
 server.registerTool(
   "list_projects",
@@ -584,10 +584,10 @@ server.registerTool(
     title: "Export a translator review sheet",
     description:
       "Write a Markdown review sheet of a variant's translations at the given statuses (default REVIEW) for a " +
-      "human translator: each row has the base (source) text, the current translation, a Verdict cell, an " +
-      "editable Suggested cell, and Notes. The translator sets Verdict to 'approve' (keep as-is) or 'edit' " +
-      "(and rewrites the Suggested cell), or leaves it blank/'skip' to defer; Notes is for flags. Returns the " +
-      "file path and the sheet inline (usable directly in chat). Feed the edited sheet back via apply_review_sheet.",
+      "human translator. Columns: #, dev_id, Base (source), Current, editable Suggested, and a final Verdict " +
+      "(A/N) cell. The translator sets Verdict to 'A' (approve — keep current) or 'N' (not approved — rewrite " +
+      "the Suggested cell), or leaves it blank to defer. Returns the file path and the sheet inline (usable " +
+      "directly in chat). Feed the edited sheet back via apply_review_sheet.",
     inputSchema: {
       projectId: z.string().describe("Ditto project developer ID"),
       variantId: z.string().optional().describe("Variant to review (default: configured default variant)"),
@@ -610,19 +610,19 @@ server.registerTool(
     // read-only Source column wraps; Current and Suggested are left intact so the
     // Suggested cell round-trips back to Ditto exactly and the approve/edit
     // comparison stays reliable.
-    const headers = ["#", "dev_id", "Base (source)", `Current (${variantId})`, "Verdict", `Suggested (${variantId})`, "Notes"];
-    const rows = items.map((it, n) => [String(n + 1), it.id, it.base, it.translation, "approve", it.translation, ""]);
+    const headers = ["#", "dev_id", "Base (source)", `Current (${variantId})`, `Suggested (${variantId})`, "Verdict (A/N)"];
+    const rows = items.map((it, n) => [String(n + 1), it.id, it.base, it.translation, it.translation, "A"]);
     const md = [
       `# Translation review — ${projectId} / ${variantId}`,
       "",
       `${items.length} item(s) at status: ${statuses.join(", ")}.`,
       "",
-      "**How to review:** in each row set **Verdict** to `approve` (keep the current translation) or `edit`",
-      "(then rewrite the **Suggested** cell with the optimal translation). Leave Verdict blank or `skip` to",
-      "defer a row (it stays in REVIEW). Use **Notes** to flag concerns. Keep `{{variables}}` and placeholders",
-      "intact. When done, run apply_review_sheet for this project + variant (or hand the file back to Claude).",
+      "**How to review:** for each row set the last column, **Verdict**, to `A` (approve — keep the current",
+      "translation) or `N` (not approved — then rewrite the **Suggested** cell with the correct translation).",
+      "Leave Verdict blank to defer a row (it stays in REVIEW). Keep `{{variables}}` and placeholders intact.",
+      "When done, run apply_review_sheet for this project + variant (or hand the file back to Claude).",
       "",
-      ...mdTable(headers, rows, [2]),
+      ...mdTable(headers, rows, [], 40),
       "",
     ].join("\n");
 
@@ -641,8 +641,8 @@ server.registerTool(
     title: "Apply a translator review sheet",
     description:
       "Parse a review sheet edited by a translator (from export_review_sheet) and push the verdicts to Ditto: " +
-      "rows whose Suggested differs from Current (or Verdict is 'edit') are written as that variant at status " +
-      "FINAL; rows marked 'approve' unchanged are promoted to FINAL; rows left blank/'skip' stay in REVIEW. " +
+      "rows marked Verdict 'A' (approve) are promoted to FINAL as-is; rows marked 'N' (not approved) are written " +
+      "as that variant at status FINAL using the Suggested cell; rows left blank stay in REVIEW. " +
       "Pass the file path, or omit it to use the default location for this project+variant. Returns a tally.",
     inputSchema: {
       projectId: z.string().describe("Ditto project developer ID"),
@@ -664,15 +664,17 @@ server.registerTool(
       if (!line.trim().startsWith("|")) continue;
       const c = splitRow(line);
       if (c.length < 6) continue;
-      const [num, id, , current, verdict, suggested] = c;
+      // Columns: # | dev_id | Base | Current | Suggested | Verdict(A/N)
+      const [, id, , current, suggested, verdict] = c;
       if (id === "dev_id" || /^-+$/.test(id) || !id) continue; // header/separator
-      const v = (verdict || "").toLowerCase();
-      if (v === "skip" || v === "") { deferred.push({ id, reason: "no verdict" }); continue; }
-      if (v === "edit" || (suggested && suggested !== current)) {
-        if (!suggested) { deferred.push({ id, reason: "edit verdict but empty Suggested" }); continue; }
-        edits.push({ id, text: suggested });
-      } else if (v === "approve") {
-        approvals.push(id);
+      const v = (verdict || "").trim().toLowerCase();
+      const approve = ["a", "approve", "y", "yes"].includes(v);
+      const notApprove = ["n", "not approve", "not approved", "no", "edit"].includes(v);
+      if (!v) { deferred.push({ id, reason: "no verdict" }); }
+      else if (approve) { approvals.push(id); }
+      else if (notApprove) {
+        if (suggested && suggested !== current) edits.push({ id, text: suggested });
+        else deferred.push({ id, reason: "marked N (not approved) but Suggested is unchanged" });
       } else {
         deferred.push({ id, reason: `unrecognised verdict '${verdict}'` });
       }

@@ -203,21 +203,32 @@ function mdWrap(s) {
   if (cur) lines.push(cur);
   return lines.join("<br>");
 }
-// Build a Markdown table. wrapCols = indices whose long text should wrap; all
-// other columns are escaped but left intact (short ids, or round-trip cells).
+// Build a Markdown table with aligned columns: every column is padded to its
+// widest cell, capped at MD_WRAP so one long sentence doesn't stretch all rows.
+// Short cells pad so their trailing pipe lines up; a cell longer than the cap is
+// the exception — in a wrapCols column it wraps onto extra lines, otherwise it
+// simply overruns that one row. (padEnd counts characters; proportional Arabic/
+// emoji still can't be pixel-aligned, but Latin/Devanagari line up well.)
 function mdTable(headers, rows, wrapCols = []) {
   const w = new Set(wrapCols);
-  const fmt = (vals) => `| ${vals.map((v, i) => (w.has(i) ? mdWrap(v) : mdCell(v))).join(" | ")} |`;
+  const all = [headers, ...rows];
+  const widths = headers.map((_, i) => Math.min(MD_WRAP, Math.max(3, ...all.map((r) => mdCell(r[i]).length))));
+  const fmtCell = (v, i) => {
+    const s = mdCell(v);
+    if (w.has(i) && s.length > widths[i]) return mdWrap(s); // long → wrap, no pad
+    return s.padEnd(widths[i]);
+  };
+  const fmt = (vals) => `| ${vals.map(fmtCell).join(" | ")} |`;
   return [
-    `| ${headers.join(" | ")} |`,
-    `| ${headers.map(() => "---").join(" | ")} |`,
+    fmt(headers),
+    `| ${widths.map((x) => "-".repeat(x)).join(" | ")} |`,
     ...rows.map(fmt),
   ];
 }
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.3" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.4" });
 
 server.registerTool(
   "list_projects",

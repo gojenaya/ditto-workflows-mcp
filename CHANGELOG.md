@@ -5,6 +5,12 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.4] - 2026-07-15
+
+### Changed
+
+- Table columns are padded to align in the raw file (short cells line up under their header); long sentences remain the exception — they wrap (wrap columns) or overrun (others). Applies to memory, conflicts, and review sheets alike. Review-sheet round-trip stays exact because apply_review_sheet trims cells.
+
 ## [0.12.3] - 2026-07-15
 
 ### Changed

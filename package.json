@@ -1,6 +1,6 @@
 {
   "name": "ditto-workflows-mcp",
-  "version": "0.12.5",
+  "version": "0.12.6",
   "description": "MCP server for Ditto (dittowords.com) — drive copy workflows and glossary-aware translation from Claude",
   "license": "MIT",
   "repository": {

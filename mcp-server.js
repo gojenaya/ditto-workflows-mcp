@@ -228,7 +228,7 @@ function mdTable(headers, rows, wrapCols = [], maxWidth = MD_WRAP) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.5" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.6" });
 
 server.registerTool(
   "list_projects",
@@ -618,9 +618,9 @@ server.registerTool(
       `${items.length} item(s) at status: ${statuses.join(", ")}.`,
       "",
       "**How to review:** for each row set the last column, **Verdict**, to `A` (approve — keep the current",
-      "translation) or `N` (not approved — then rewrite the **Suggested** cell with the correct translation).",
-      "Leave Verdict blank to defer a row (it stays in REVIEW). Keep `{{variables}}` and placeholders intact.",
-      "When done, run apply_review_sheet for this project + variant (or hand the file back to Claude).",
+      "translation) or `N` (not approved). To fix a translation, edit its **Suggested** cell — any change there",
+      "is applied whatever the verdict letter. Leave Verdict blank AND Suggested unchanged to defer a row (it",
+      "stays in REVIEW). Keep `{{variables}}` and placeholders intact. When done, run apply_review_sheet.",
       "",
       ...mdTable(headers, rows, [], 40),
       "",
@@ -641,9 +641,9 @@ server.registerTool(
     title: "Apply a translator review sheet",
     description:
       "Parse a review sheet edited by a translator (from export_review_sheet) and push the verdicts to Ditto: " +
-      "rows marked Verdict 'A' (approve) are promoted to FINAL as-is; rows marked 'N' (not approved) are written " +
-      "as that variant at status FINAL using the Suggested cell; rows left blank stay in REVIEW. " +
-      "Pass the file path, or omit it to use the default location for this project+variant. Returns a tally.",
+      "any row whose Suggested cell was changed is written as that variant at FINAL (honoured whatever the " +
+      "verdict letter); rows marked 'A' (approve) with an unchanged Suggested are promoted to FINAL as-is; " +
+      "rows left blank stay in REVIEW. Pass the file path, or omit it for the default location. Returns a tally.",
     inputSchema: {
       projectId: z.string().describe("Ditto project developer ID"),
       variantId: z.string().optional().describe("Variant (default: configured default variant)"),
@@ -670,14 +670,12 @@ server.registerTool(
       const v = (verdict || "").trim().toLowerCase();
       const approve = ["a", "approve", "y", "yes"].includes(v);
       const notApprove = ["n", "not approve", "not approved", "no", "edit"].includes(v);
-      if (!v) { deferred.push({ id, reason: "no verdict" }); }
+      // A changed Suggested cell is always honoured, whatever the verdict letter —
+      // editing the text is itself an unambiguous signal.
+      if (suggested && suggested !== current) { edits.push({ id, text: suggested }); }
       else if (approve) { approvals.push(id); }
-      else if (notApprove) {
-        if (suggested && suggested !== current) edits.push({ id, text: suggested });
-        else deferred.push({ id, reason: "marked N (not approved) but Suggested is unchanged" });
-      } else {
-        deferred.push({ id, reason: `unrecognised verdict '${verdict}'` });
-      }
+      else if (notApprove) { deferred.push({ id, reason: "marked N (not approved) but Suggested is unchanged" }); }
+      else { deferred.push({ id, reason: "no verdict" }); }
     }
 
     if (edits.length) {

@@ -5,6 +5,12 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.6] - 2026-07-15
+
+### Changed
+
+- apply_review_sheet now honours any changed Suggested cell as an edit regardless of the A/N verdict letter — so a translator who edits the translation but leaves the verdict at A does not silently lose the edit.
+
 ## [0.12.5] - 2026-07-15
 
 ### Changed

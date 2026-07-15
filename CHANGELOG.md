@@ -5,6 +5,12 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-07-15
+
+### Changed
+
+- `/ditto-handoff` now runs autonomously end to end by default — it applies dev-ID renames, variablisation, and translations without pausing for per-step approval, then stages the whole batch at REVIEW. Safe because nothing is promoted to FINAL; the human review happens afterwards (`/ditto-review` or a review sheet). It stops only for genuine blockers (auth, ambiguous project), or if the user explicitly asks to review as they go.
+
 ## [0.12.6] - 2026-07-15
 
 ### Changed

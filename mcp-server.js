@@ -159,7 +159,7 @@ async function patchSkippingUnknown(body) {
 // variablise.js — the suggestion step is Claude-side, only detection lives here.
 const DYNAMIC_PATTERNS = [
   { pattern: /\b\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}\b/i, type: "date" },
-  { pattern: /[$€£¥₹]\s*[\d,]+(\.\d{1,2})?/, type: "amount" },
+  { pattern: /[ďđ$€£¥₹]\s*[\d,]+(\.\d{1,2})?/, type: "amount" },
   // Currency code before OR after the number: "AED 8.00" and "8.00 AED".
   { pattern: /\b(AED|USD|EUR|GBP|SAR|INR|PKR|PHP)\s*[\d,]+(\.\d{1,2})?/i, type: "amount" },
   { pattern: /\b[\d,]+(\.\d{1,2})?\s*(AED|USD|EUR|GBP|SAR|INR|PKR|PHP)\b/i, type: "amount" },
@@ -228,7 +228,7 @@ function mdTable(headers, rows, wrapCols = [], maxWidth = MD_WRAP) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.13.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.13.1" });
 
 server.registerTool(
   "list_projects",

@@ -5,6 +5,12 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-07-15
+
+### Fixed
+
+- Variablise detection now recognises the botim dirham glyph `ď` (and `đ`) in amounts (e.g. `ď3,000`, `Total outstanding: ď200.00`) — restored from the original ditto-script patterns, dropped during the port.
+
 ## [0.13.0] - 2026-07-15
 
 ### Changed

@@ -13,7 +13,7 @@ Glossary-aware translation of a project's untranslated strings using the ditto-w
 
 ## Procedure
 
-1. **Refresh assets:** call `refresh_translation_assets(variantId?)` so the translation memory reflects the latest FINAL (expert-approved) copy. Note the unique-source count and any conflicts it reports (surface conflicts to the user — the memory can't be a single source of truth while a source text has two approved translations).
+1. **Refresh assets:** call `refresh_translation_assets(variantId?)` so the translation memory reflects the latest FINAL (expert-approved) copy. It excludes configured test/sandbox projects and holds conflicting sources OUT of the memory (they go to a separate `translation-conflicts.md` for the user to resolve — don't translate from that file). Note the memory-entry count; mention the conflict count so the user knows some sources are pending resolution.
 2. **Read the glossary:** read the `ditto://glossary/{variantId}` resource BEFORE translating anything. If it comes back empty, stop and tell the user: either distill one first (read the translation-memory file from step 1 in chunks and extract locked terms + voice rules into `translation-assets/` files), or confirm they want to translate without a glossary.
 3. **Fetch the work:** call `list_untranslated(projectId, variantId?)`. If count is 0, say so and stop.
 4. **Load the memory for reuse:** read `translation-assets/{variantId}/translation-memory.md` (the Memory table from step 1). This is your reference for reuse — do NOT translate from scratch what the workspace has already approved.

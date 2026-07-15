@@ -33,6 +33,25 @@ export function getDefaultVariant() {
 export function setDefaultVariant(variantId) {
   const cfg = readConfig();
   cfg.defaultVariant = variantId;
+  writeConfig(cfg);
+}
+
+function writeConfig(cfg) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
+}
+
+// Projects to exclude from the translation memory / conflict scan — e.g.
+// sandboxes and QA playgrounds whose copy should never seed real translations.
+// Kept in the gitignored config (workspace-specific — never hardcoded, since the
+// repo is public).
+export function getExcludedProjects() {
+  const c = readConfig().excludedProjects;
+  return Array.isArray(c) ? c : [];
+}
+
+export function setExcludedProjects(projectIds) {
+  const cfg = readConfig();
+  cfg.excludedProjects = projectIds;
+  writeConfig(cfg);
 }

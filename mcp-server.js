@@ -18,7 +18,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { dittoFetch, dittoPatch } from "./ditto-api.js";
-import { getDefaultVariant, setDefaultVariant, DATA_DIR, CONFIG_PATH } from "./config.js";
+import { getDefaultVariant, setDefaultVariant, getExcludedProjects, setExcludedProjects, DATA_DIR, CONFIG_PATH } from "./config.js";
 import {
   setSessionToken, getSessionToken, tokenExpiry, validateToken,
   fetchWorkspaceDump, renameDevId, projectMongoIdByDevId,
@@ -183,7 +183,7 @@ function detectDynamicTypes(text) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.11.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.12.0" });
 
 server.registerTool(
   "list_projects",
@@ -727,18 +727,22 @@ server.registerTool(
   {
     title: "Refresh translation assets",
     description:
-      "Build the variant's translation memory from every FINAL (expert-approved) translation across the " +
-      "workspace, paired with its source text. Groups by source text: identical source→translation pairs are " +
-      "collapsed (with their occurrence count), and any source with DIFFERENT FINAL translations is flagged as " +
-      "a CONFLICT listing each translation's dev IDs + project IDs to confirm/fix. Writes a clean Markdown " +
-      "table to translation-assets/{variant}/translation-memory.md and returns counts + the conflict list. " +
-      "Reference this memory before translating so existing terms/sentences are reused, not re-invented.",
+      "Build the variant's translation memory from FINAL (expert-approved) translations across the workspace, " +
+      "paired with source text. Excludes configured test/sandbox projects (set_excluded_projects). Groups by " +
+      "source: a source with ONE agreed translation goes into the memory (translation-assets/{variant}/" +
+      "translation-memory.md — a clean table, reference it before translating so existing copy is reused). A " +
+      "source with DIFFERENT FINAL translations is a CONFLICT: it is kept OUT of the memory until resolved and " +
+      "written to a separate translation-assets/{variant}/translation-conflicts.md with each translation's dev " +
+      "IDs + project IDs. Returns counts + the conflicts file path.",
     inputSchema: {
       variantId: z.string().optional().describe("Variant to refresh (default: configured default variant)"),
+      excludeProjects: z.array(z.string()).optional()
+        .describe("Project dev IDs to skip entirely (default: the configured excluded/test projects)"),
     },
   },
-  async ({ variantId }) => {
+  async ({ variantId, excludeProjects }) => {
     variantId = requireVariant(variantId);
+    const excluded = new Set(excludeProjects ?? getExcludedProjects());
     // No projects filter = whole workspace. Base + variant come back in one list.
     const filter = JSON.stringify({ variants: [{ id: variantId }, { id: "base" }] });
     const all = await dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`);
@@ -748,11 +752,12 @@ server.registerTool(
       if (i.variantId === null && i.pluralForm === null) baseText.set(i.id, i.text);
     }
 
-    // Group FINAL variant translations by source text.
+    // Group FINAL variant translations by source text — skipping excluded projects.
     // groups: sourceText → Map(translation → [{id, projectId}])
     const groups = new Map();
     for (const i of all) {
       if (i.variantId !== variantId || i.status !== "FINAL" || i.pluralForm !== null) continue;
+      if (excluded.has(i.projectId)) continue;
       const source = baseText.get(i.id);
       if (source === undefined) continue;
       if (!groups.has(source)) groups.set(source, new Map());
@@ -761,94 +766,105 @@ server.registerTool(
       byTr.get(i.text).push({ id: i.id, projectId: i.projectId ?? "?" });
     }
 
-    const unique = []; // {source, translation, count}
-    const conflicts = []; // {source, options:[{translation, refs:[{id,projectId}]}]}
+    // A source with one agreed translation → memory. More than one → conflict
+    // (kept OUT of memory until resolved).
+    const memory = []; // {source, translation}
+    const conflicts = []; // {source, options:[{translation, refs}]}
     for (const [source, byTr] of groups) {
-      if (byTr.size === 1) {
-        const [translation, refs] = [...byTr.entries()][0];
-        unique.push({ source, translation, count: refs.length });
-      } else {
-        conflicts.push({
-          source,
-          options: [...byTr.entries()].map(([translation, refs]) => ({ translation, refs })),
-        });
-      }
+      if (byTr.size === 1) memory.push({ source, translation: [...byTr.keys()][0] });
+      else conflicts.push({ source, options: [...byTr.entries()].map(([translation, refs]) => ({ translation, refs })) });
     }
-    unique.sort((a, b) => a.source.localeCompare(b.source));
+    memory.sort((a, b) => a.source.localeCompare(b.source));
     conflicts.sort((a, b) => a.source.localeCompare(b.source));
 
     const cell = (s) => (s ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");
-    const lines = [
-      `# Translation memory — '${variantId}' (auto-generated ${new Date().toISOString().slice(0, 10)})`,
-      "",
-      "FINAL-status (expert-approved) source → translation pairs from the Ditto workspace, grouped by source",
-      "text. Reference this before translating so existing terms/sentences are reused, not re-invented.",
-      "Regenerated by refresh_translation_assets — do not hand-edit.",
-      "",
-      `## Memory — ${unique.length} unique source text(s)`,
-      "",
-      `| Source | ${variantId} | uses |`,
-      "|--------|--------|------|",
-      ...unique.map((u) => `| ${cell(u.source)} | ${cell(u.translation)} | ${u.count} |`),
-      "",
-    ];
-    if (conflicts.length) {
-      lines.push(
-        `## ⚠️ Conflicts — same source, different FINAL translations (${conflicts.length}) — CONFIRM & FIX`,
-        "",
-        "The same source text has more than one approved translation. Confirm the right one and re-align the",
-        "others (edit + re-approve via the review tools), so the memory has a single answer per source.",
-        "",
-        `| Source | ${variantId} | dev_id | project |`,
-        "|--------|--------|--------|---------|",
-      );
-      for (const c of conflicts) {
-        for (const opt of c.options) {
-          for (const ref of opt.refs) {
-            lines.push(`| ${cell(c.source)} | ${cell(opt.translation)} | ${cell(ref.id)} | ${cell(ref.projectId)} |`);
-          }
-        }
-      }
-      lines.push("");
+    // Pad a column to its widest value so raw rows line up. RTL (Arabic) text is
+    // always the LAST column, so nothing after it gets visually reordered.
+    const pad = (rows, i) => Math.max(0, ...rows.map((r) => cell(r[i]).length));
+    function table(headers, rows) {
+      const widths = headers.map((h, i) => Math.max(h.length, pad(rows, i)));
+      // Don't pad the final column (free-flowing / RTL) or very wide columns.
+      const w = (i) => (i === headers.length - 1 || widths[i] > 60 ? 0 : widths[i]);
+      const fmt = (vals) => `| ${vals.map((v, i) => cell(v).padEnd(w(i))).join(" | ")} |`;
+      return [
+        fmt(headers),
+        `| ${headers.map((h, i) => "-".repeat(Math.max(3, w(i) || h.length))).join(" | ")} |`,
+        ...rows.map(fmt),
+      ];
     }
 
-    const dir = path.join(ASSETS, variantId);
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "translation-memory.md");
-    fs.writeFileSync(file, lines.join("\n"));
+    const memDir = path.join(ASSETS, variantId);
+    fs.mkdirSync(memDir, { recursive: true });
+    const memFile = path.join(memDir, "translation-memory.md");
+    fs.writeFileSync(memFile, [
+      `# Translation memory — '${variantId}' (auto-generated ${new Date().toISOString().slice(0, 10)})`,
+      "",
+      "FINAL (expert-approved) source → translation, one agreed answer per source. Test/sandbox projects and",
+      "unresolved conflicts are excluded. Reference this before translating so existing copy is reused.",
+      "Regenerated by refresh_translation_assets — do not hand-edit.",
+      "",
+      `## Memory — ${memory.length} source text(s)`,
+      "",
+      ...table(["Source", variantId], memory.map((m) => [m.source, m.translation])),
+      "",
+    ].join("\n"));
 
-    // Keep the returned payload lean — the full detail is in the file. Cap the
-    // conflict sample and the refs listed per translation.
-    const REF_CAP = 5, CONFLICT_CAP = 40;
-    const conflictSample = conflicts.slice(0, CONFLICT_CAP).map((c) => ({
-      source: c.source,
-      translations: c.options.map((o) => ({
-        translation: o.translation,
-        at: o.refs.slice(0, REF_CAP).map((r) => `${r.id}@${r.projectId}`),
-        ...(o.refs.length > REF_CAP ? { andMore: o.refs.length - REF_CAP } : {}),
-      })),
-    }));
+    // Conflicts go in their own file (not the memory), for the user to resolve.
+    const conflictFile = path.join(memDir, "translation-conflicts.md");
+    if (conflicts.length) {
+      const rows = [];
+      for (const c of conflicts) {
+        for (const opt of c.options) {
+          for (const ref of opt.refs) rows.push([c.source, ref.id, ref.projectId, opt.translation]);
+        }
+      }
+      fs.writeFileSync(conflictFile, [
+        `# Translation conflicts — '${variantId}' (auto-generated ${new Date().toISOString().slice(0, 10)})`,
+        "",
+        `${conflicts.length} source text(s) have more than one FINAL translation (test/sandbox projects excluded).`,
+        "These are kept OUT of the translation memory until resolved. Pick the correct translation and re-align",
+        "the others (edit + re-approve via the review tools); the next refresh moves resolved ones into memory.",
+        "",
+        ...table(["Source", "dev_id", "project", variantId], rows),
+        "",
+      ].join("\n"));
+    } else {
+      try { fs.unlinkSync(conflictFile); } catch { /* none to clear */ }
+    }
+
     return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(
-            {
-              variantId,
-              uniqueSources: unique.length,
-              conflicts: conflicts.length,
-              wrote: file,
-              conflictSample,
-              ...(conflicts.length > CONFLICT_CAP
-                ? { note: `Showing ${CONFLICT_CAP} of ${conflicts.length} conflicts — full list (with all dev IDs + projects) is in the file's Conflicts table.` }
-                : { note: "Full memory + conflicts (with dev IDs + projects) are in the file. Reference the memory before translating; resolve conflicts so each source has one FINAL translation." }),
-            },
-            null,
-            2,
-          ),
-        },
-      ],
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          variantId,
+          excludedProjects: [...excluded],
+          memoryEntries: memory.length,
+          conflicts: conflicts.length,
+          memoryFile: memFile,
+          conflictsFile: conflicts.length ? conflictFile : null,
+          note: conflicts.length
+            ? `${conflicts.length} conflicts held out of memory — see the conflicts file, resolve, then re-refresh.`
+            : "No conflicts — memory is complete.",
+        }, null, 2),
+      }],
     };
+  },
+);
+
+server.registerTool(
+  "set_excluded_projects",
+  {
+    title: "Set excluded (test/sandbox) projects",
+    description:
+      "Set the list of project developer IDs to exclude from the translation memory and conflict scan — " +
+      "sandboxes/QA playgrounds whose copy must never seed real translations. Persisted locally.",
+    inputSchema: {
+      projectIds: z.array(z.string()).describe("Project developer IDs to exclude (replaces the current list)"),
+    },
+  },
+  async ({ projectIds }) => {
+    setExcludedProjects(projectIds);
+    return { content: [{ type: "text", text: `Excluded projects set to: ${projectIds.join(", ") || "(none)"} (saved to ${CONFIG_PATH}).` }] };
   },
 );
 

@@ -5,6 +5,12 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-07-17
+
+### Changed
+
+- **Token-efficient parallel translation.** `/ditto-translate` and `/ditto-handoff` now delegate each variant's translation to its own subagent, run concurrently, each returning only a compact summary (`{variantId, wrote, skipped}`). The bulky data — the untranslated list, the ~25k-char glossary, the memory table — stays inside the subagent's context (discarded when it returns) instead of accumulating in the orchestrator. Independent variants never conflict; a single variant is never split across agents (keeps repeated-string terminology consistent). Falls back to inline translation where no subagent/Task capability exists.
+
 ## [0.13.1] - 2026-07-15
 
 ### Fixed

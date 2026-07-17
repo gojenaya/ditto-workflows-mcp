@@ -228,7 +228,7 @@ function mdTable(headers, rows, wrapCols = [], maxWidth = MD_WRAP) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.13.1" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.14.0" });
 
 server.registerTool(
   "list_projects",

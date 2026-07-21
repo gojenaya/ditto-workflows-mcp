@@ -216,3 +216,61 @@ export async function linkComponent(componentMongoId, projectMongoId, textItemId
     body: JSON.stringify({ projectId: projectMongoId, textItemIds, wasSuggested: false }),
   });
 }
+
+// ─── Style-guide endpoints (rules read/write) ─────────────────────────────────
+//
+// The public API can READ style guides but has NO write path for rules — these
+// backend routes (used by the web app's style-guide editor) are the only way to
+// add rules programmatically. Rule shape (the web app's zod schema):
+//   { _id, workspaceId, styleguideId,      // server-owned
+//     sectionId,                            // which section the rule sits in
+//     enabled: bool, name, description,
+//     examples: [{ from, to }],             // wrong → right pairs
+//     tags: [string] }
+//   GET    /styleguide                       → workspace style guides (+ sections)
+//   GET    /styleguide/rules?styleguideId=…  → that guide's rules
+//   POST   /styleguide/rules  {styleguideId, rules:[…]}  → create rules
+//   PUT    /styleguide/rules/{ruleId}  {…}   → update one rule
+//   DELETE /styleguide/rules  {styleguideRuleIds:[…]}    → delete rules
+
+// Workspace style guides with their section metadata (sectionId, name, kind:
+// "wordlist" | "rules"). Rules themselves are fetched per-guide below.
+export async function listStyleGuides() {
+  const raw = await backendFetch("/styleguide");
+  return Array.isArray(raw) ? raw : raw.styleguides || raw.data || [];
+}
+
+export async function listStyleGuideRules(styleguideId) {
+  const raw = await backendFetch(`/styleguide/rules?styleguideId=${encodeURIComponent(styleguideId)}`);
+  return Array.isArray(raw) ? raw : raw.rules || raw.data || [];
+}
+
+// Create one or more rules in a style guide. Each rule: {sectionId, name,
+// description, examples?:[{from,to}], tags?:[], enabled?:true}. Returns the
+// created rule objects (with their new _ids).
+export async function addStyleGuideRules(styleguideId, rules) {
+  const body = {
+    styleguideId,
+    rules: rules.map((r) => ({
+      sectionId: r.sectionId,
+      enabled: r.enabled !== false,
+      name: r.name,
+      description: r.description || "",
+      examples: (r.examples || []).map((e) => ({ from: e.from, to: e.to })),
+      tags: r.tags || [],
+    })),
+  };
+  const raw = await backendFetch("/styleguide/rules", { method: "POST", body: JSON.stringify(body) });
+  return Array.isArray(raw) ? raw : raw.rules || [raw];
+}
+
+export async function updateStyleGuideRule(ruleId, patch) {
+  return backendFetch(`/styleguide/rules/${ruleId}`, { method: "PUT", body: JSON.stringify(patch) });
+}
+
+export async function deleteStyleGuideRules(ruleIds) {
+  return backendFetch("/styleguide/rules", {
+    method: "DELETE",
+    body: JSON.stringify({ styleguideRuleIds: ruleIds }),
+  });
+}

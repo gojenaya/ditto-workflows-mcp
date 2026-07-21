@@ -5,11 +5,16 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — `no-review-direct-final` branch
+## [Unreleased] — `no-review-direct-final` branch (+ style-guide guardrail & feedback loop)
+
+### Added
+
+- **Style-guide rule tools (unofficial backend).** `list_style_guides`, `list_style_guide_rules`, and `add_style_guide_rules` wrap Ditto's internal style-guide routes — the public API can read style guides but has no write path for rules. `add_style_guide_rules` creates rules with `examples:[{from,to}]` (wrong→right pairs), a section, and tags. Endpoints reverse-engineered from the web app and verified live (create → confirm → delete leaves no trace). Needs a session token, like the other backend tools.
 
 ### Changed
 
 - **No review stage — copy lands at FINAL directly.** On this branch `/ditto-translate` writes translations at `FINAL` (instead of `WIP`) and `/ditto-handoff` sets the whole batch to `FINAL` (instead of staging at `REVIEW`). The `/ditto-review` gate is no longer part of the default flow. Both skills now instruct extra caution — skip and flag anything ambiguous rather than committing a guess as approved copy, since nothing sits in review before shipping. The `with-review-process` branch keeps the WIP → REVIEW → FINAL flow.
+- **`/ditto-review` gained a flag-only guardrail and a correction→rule feedback loop.** Before review, a guardrail pass checks each item against the Ditto style guide (`get_styleguide_rules` via the official Ditto MCP when connected), the local glossary/voice-rules, and the nova-copy references — flagging only objective, nameable violations (never rewrites, never nitpicks intentional copy). After review, generalizable reviewer corrections (do-not-translate brand terms, common mistranslations, voice rules) are distilled into the local glossary/voice-rules and, with the reviewer's explicit OK, pushed to the Ditto style guide via `add_style_guide_rules`. (On this branch `/ditto-review` is an optional QA/learning pass rather than a required gate.)
 
 ## [0.14.0] - 2026-07-17
 

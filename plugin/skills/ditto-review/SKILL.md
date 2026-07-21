@@ -1,6 +1,6 @@
 ---
 name: ditto-review
-description: Review pending Ditto translations for a project — either interactively in chat or by handing a human translator a Markdown review sheet — then push results back (edits and approvals become FINAL). Includes a flag-only guardrail pass that checks copy against the Ditto style guide, the local glossary/voice-rules, and the nova-copy references to catch what slipped through. Use when the user wants to review, QA, approve, or hand off translations for review in Ditto.
+description: Review pending Ditto translations for a project — either interactively in chat or by handing a human translator a Markdown review sheet — then push results back (edits and approvals become FINAL). Includes a flag-only guardrail pass that checks copy against the Ditto style guide, the local glossary/voice-rules, and the nova-copy references to catch what slipped through, and a feedback loop that turns reviewer corrections into durable rules pushed back to the Ditto style guide. Use when the user wants to review, QA, approve, or hand off translations for review in Ditto.
 ---
 
 # Ditto translation review loop
@@ -40,8 +40,8 @@ Output a compact list: item id · the flagged text · the rule it breaks (name t
 0. **Run the guardrail check first** (above) so the flags can be written into each row's Notes for the translator.
 1. `export_review_sheet(projectId, variantId?, statuses=['REVIEW'])` — writes a Markdown sheet (base · current translation · Verdict · editable Suggested · Notes) and returns its path + content. Pre-fill Notes with any guardrail flag for that row (rule + severity only, no suggested rewrite). Give the translator the path (or paste the sheet in chat).
 2. The translator edits each row: `approve` to keep, or `edit` + rewrite the Suggested cell; blank/`skip` to defer; Notes to flag. `{{variables}}` and placeholders stay intact.
-3. `apply_review_sheet(projectId, variantId?, path?)` — pushes it back: edited rows written at FINAL, approvals promoted to FINAL, deferred rows left in REVIEW. Report the returned tally (edited / approved / deferred).
-4. Then do step "Refresh the translation memory" below.
+3. `apply_review_sheet(projectId, variantId?, path?)` — pushes it back: edited rows written at FINAL, approvals promoted to FINAL, deferred rows left in REVIEW. Report the returned tally (edited / approved / deferred). **Keep the edited rows** (their Current vs Suggested text) for the "Learn from corrections" step.
+4. Then do "Refresh the translation memory" and "Learn from corrections" below.
 
 ## Mode B — interactive review, procedure
 
@@ -59,6 +59,23 @@ Output a compact list: item id · the flagged text · the rule it breaks (name t
    - Skips → leave untouched, carry to the tally
 6. **Tally at the end:** report counts of approved / edited / skipped, plus any items where the push failed or was skipped by the API.
 7. **Refresh the translation memory:** if anything was promoted or edited to FINAL, call `refresh_translation_assets(variantId)` so the local translation memory picks up the newly approved copy. If the session surfaced recurring glossary gaps or tone drift, suggest re-distilling the glossary from the refreshed memory.
+8. Then do "Learn from corrections" below.
+
+## Learn from corrections — feed rules back to the style guide
+
+Every reviewer edit is a signal: Claude's translation was wrong in a way a human fixed. Turn the *generalizable* ones into durable rules so the mistake isn't repeated. A correction is a `{from: what Claude/the old copy said, to: what the reviewer approved}` pair — from the edited review-sheet rows (Mode A) or the in-chat edits (Mode B).
+
+1. **Distill — only what generalizes.** From the corrections, keep the ones that state a reusable rule, not a one-off phrasing preference:
+   - a **do-not-translate** brand/product term (e.g. `botim Credit` / `botim Finance` / `botim Pay` must stay in English/Latin);
+   - a **commonly-mistranslated** word or phrase with a clear right form;
+   - a **voice rule** (e.g. a CTA must not use a third-person present verb — `يكمل` → `متابعة`).
+   Drop pure stylistic tweaks the reviewer just preferred in that one spot. When unsure whether it generalizes, ask the reviewer.
+2. **Update the local source of truth first.** Add each distilled rule to the variant's `translation-assets/{v}-glossary.md` (terms / do-not-translate) or `{v}-voice-rules.md` (voice/grammar), with a dated changelog note — this is what `/ditto-translate` reads on every run.
+3. **Then push to the Ditto style guide** (so designers see it where they work). This writes to a shared, cross-team artifact — **show the reviewer the exact rules you'll add and get a yes before writing.**
+   - `list_style_guides` → pick the guide; choose a section by `kind` (`wordlist` for terms/do-not-translate, `rules` for voice/grammar).
+   - `list_style_guide_rules(styleguideId)` → skip anything already covered; don't duplicate.
+   - `add_style_guide_rules(styleguideId, rules)` — each rule `{sectionId, name, description, examples:[{from,to}], tags}`. Put the wrong→right pair in `examples` (`from` = wrong, `to` = correct); tag with the variant id and a category (`brand`, `cta`, …).
+   - Report what was added. (Requires a session token — `set_session_token` / `login_to_ditto` — since style-guide writes use the unofficial backend.)
 
 ## Rules
 
@@ -67,3 +84,4 @@ Output a compact list: item id · the flagged text · the rule it breaks (name t
 - Guardrail is high-precision by design — a false flag on intentional copy wastes the reviewer's time and erodes trust in the pass. When unsure whether something breaks a nameable rule, stay silent.
 - Preserve `{{variables}}`, placeholders, and markup in edits exactly.
 - Batch writes (one `write_translations` / `update_status` call per batch), not per-item calls.
+- Style-guide rules are a shared, cross-team artifact — never push one without showing the reviewer the exact rule and getting an explicit yes. Update the local glossary/voice-rules first; the Ditto style guide mirrors it.

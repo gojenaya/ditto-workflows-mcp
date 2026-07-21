@@ -1,6 +1,6 @@
 ---
 name: ditto-translate
-description: Translate a Ditto project's untranslated strings into one or more variants — refresh translation assets, read the workspace glossary, translate in batches with self-review, write back as WIP for expert review. Use when the user wants to translate or localise strings in Ditto.
+description: Translate a Ditto project's untranslated strings into one or more variants — refresh translation assets, read the workspace glossary, translate in batches with self-review, write back directly as FINAL (no review stage). Use when the user wants to translate or localise strings in Ditto.
 ---
 
 # Ditto translation loop
@@ -34,12 +34,12 @@ Independent by construction: different variants are different variant writes wit
    - Only translate from scratch when the memory has nothing close.
    - Always: apply locked glossary terms exactly; follow the voice rules; preserve `{{variables}}`/placeholders untranslated; keep UI-string lengths sensible.
 6. **Self-review each batch before writing:** re-check every translation against the memory, locked terms, and voice rules; fix violations. Skip (don't guess) strings that can't be translated confidently without UI context — ambiguous single words, truncated fragments.
-7. **Write back:** `write_translations(batch, variantId, status: "WIP")` — one call per batch.
-8. **Return / report:** as a subagent, return the compact summary object only. Running inline, report total written + every skipped item with the reason, then suggest `/ditto-review` (an expert promotes WIP → FINAL).
+7. **Write back:** `write_translations(batch, variantId, status: "FINAL")` — one call per batch. This variant writes FINAL directly; there is no WIP/REVIEW staging step.
+8. **Return / report:** as a subagent, return the compact summary object only. Running inline, report total written (at FINAL) + every skipped item with the reason. Because translations land at FINAL immediately, be conservative — skip anything you can't translate confidently rather than committing a guess as approved copy.
 
 ## Rules
 
 - The glossary lives in the MCP resource — read it fresh every run; never copy its rules into this skill or assume them from memory.
-- Always write at status **WIP**. Promotion to FINAL is a human decision, made in `/ditto-review`.
-- Skipping with a stated reason beats a confident-sounding guess.
+- Write at status **FINAL** directly — this variant has no review stage. (The review-process variant of this skill writes WIP and hands off to `/ditto-review`; this one does not.)
+- Skipping with a stated reason beats a confident-sounding guess — doubly so here, since FINAL copy ships without a review gate.
 - A subagent returns a compact summary, never the bulk (translations/lists/glossary) — that isolation is what keeps orchestrator tokens low.

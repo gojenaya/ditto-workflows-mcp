@@ -5,6 +5,12 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — `no-review-direct-final` branch
+
+### Changed
+
+- **No review stage — copy lands at FINAL directly.** On this branch `/ditto-translate` writes translations at `FINAL` (instead of `WIP`) and `/ditto-handoff` sets the whole batch to `FINAL` (instead of staging at `REVIEW`). The `/ditto-review` gate is no longer part of the default flow. Both skills now instruct extra caution — skip and flag anything ambiguous rather than committing a guess as approved copy, since nothing sits in review before shipping. The `with-review-process` branch keeps the WIP → REVIEW → FINAL flow.
+
 ## [0.14.0] - 2026-07-17
 
 ### Changed

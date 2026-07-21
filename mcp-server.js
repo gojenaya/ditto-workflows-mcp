@@ -24,6 +24,7 @@ import {
   fetchWorkspaceDump, renameDevId, projectMongoIdByDevId,
   createTextItem, connectTextItems, fetchLibraryComponents, linkComponent,
   newObjectId, toRichText, TOKEN_HELP,
+  listStyleGuides, listStyleGuideRules, addStyleGuideRules,
 } from "./ditto-backend.js";
 import { parseFigmaUrl, getFigmaTextNodes, isPlaceholder, normalizeText, FIGMA_KEY_HELP } from "./figma-api.js";
 
@@ -1283,6 +1284,98 @@ server.registerTool(
           type: "text",
           text: JSON.stringify({ projectId, counts, results }, null, 2),
         },
+      ],
+    };
+  },
+);
+
+server.registerTool(
+  "list_style_guides",
+  {
+    title: "List Ditto style guides (unofficial)",
+    description:
+      "List the workspace's Ditto style guides with their sections. Each section has a sectionId, a name, " +
+      "and a kind ('wordlist' or 'rules') — you need a section's id to add a rule to it. UNOFFICIAL: uses " +
+      "the web app's internal backend (needs a session token via set_session_token / login_to_ditto).",
+    inputSchema: {},
+  },
+  async () => {
+    const guides = await listStyleGuides();
+    const slim = guides.map((g) => ({
+      id: g._id,
+      name: g.name,
+      developerId: g.developerId,
+      variantId: g.variantId,
+      enabledByDefault: g.enabledByDefault,
+      sections: (g.sections || []).map((s) => ({ sectionId: s.sectionId, name: s.name, kind: s.kind })),
+    }));
+    return { content: [{ type: "text", text: JSON.stringify(slim, null, 2) }] };
+  },
+);
+
+server.registerTool(
+  "list_style_guide_rules",
+  {
+    title: "List Ditto style-guide rules (unofficial)",
+    description:
+      "List the rules in a style guide (by its id from list_style_guides). Each rule has a name, description, " +
+      "sectionId, examples ([{from, to}] wrong→right pairs), tags, and enabled flag. Read these before adding " +
+      "new rules so you don't duplicate an existing one. UNOFFICIAL: internal backend, needs a session token.",
+    inputSchema: {
+      styleguideId: z.string().describe("Style-guide id (the _id from list_style_guides)"),
+    },
+  },
+  async ({ styleguideId }) => {
+    const rules = await listStyleGuideRules(styleguideId);
+    const slim = rules.map((r) => ({
+      id: r._id,
+      sectionId: r.sectionId,
+      name: r.name,
+      description: r.description,
+      examples: (r.examples || []).map((e) => ({ from: e.from, to: e.to })),
+      tags: r.tags || [],
+      enabled: r.enabled,
+    }));
+    return { content: [{ type: "text", text: JSON.stringify({ styleguideId, count: slim.length, rules: slim }, null, 2) }] };
+  },
+);
+
+server.registerTool(
+  "add_style_guide_rules",
+  {
+    title: "Add Ditto style-guide rules (unofficial)",
+    description:
+      "Add one or more rules to a Ditto style guide — the write path the public API lacks. Use this to push a " +
+      "reviewer-confirmed rule back into the style guide designers see: a do-not-translate brand term, a " +
+      "commonly-mistranslated word, or a voice rule. Each rule: {sectionId, name, description, examples?:[{from, " +
+      "to}], tags?}. Put wrong→right pairs in examples (from = wrong, to = correct). Pick a sectionId from " +
+      "list_style_guides (kind 'rules' for voice/grammar, 'wordlist' for terms). Call list_style_guide_rules " +
+      "first to avoid duplicates. UNOFFICIAL: internal backend, needs a session token (set_session_token / login_to_ditto).",
+    inputSchema: {
+      styleguideId: z.string().describe("Target style-guide id (from list_style_guides)"),
+      rules: z
+        .array(
+          z.object({
+            sectionId: z.string().describe("Section to add the rule to (from list_style_guides)"),
+            name: z.string().min(1).describe("Short rule title"),
+            description: z.string().describe("What the rule says and why").optional(),
+            examples: z
+              .array(z.object({ from: z.string(), to: z.string() }))
+              .describe("Wrong→right pairs: from = incorrect, to = correct")
+              .optional(),
+            tags: z.array(z.string()).describe("Tags (e.g. variant id, 'cta', 'brand')").optional(),
+          }),
+        )
+        .min(1)
+        .describe("Rules to add"),
+    },
+  },
+  async ({ styleguideId, rules }) => {
+    const created = await addStyleGuideRules(styleguideId, rules);
+    const slim = (created || []).map((r) => ({ id: r._id, name: r.name, sectionId: r.sectionId }));
+    return {
+      content: [
+        { type: "text", text: JSON.stringify({ styleguideId, added: slim.length, rules: slim }, null, 2) },
       ],
     };
   },

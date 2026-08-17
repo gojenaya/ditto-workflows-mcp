@@ -182,6 +182,123 @@ function detectDynamicTypes(text) {
   return [...types];
 }
 
+// ─── TRANSLATION MEMORY ──────────────────────────────────────────────────────
+// The variant's FINAL-translation index, built straight from the API. Shared by
+// refresh_translation_assets (which renders it to Markdown for humans) and
+// lookup_translation_memory (which queries it for Claude), so the two can never
+// disagree about what counts as memory versus conflict.
+async function buildMemoryIndex(variantId, excluded) {
+  // No projects filter = whole workspace. Base + variant come back in one list.
+  const filter = JSON.stringify({ variants: [{ id: variantId }, { id: "base" }] });
+  const all = await dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`);
+
+  const baseText = new Map();
+  for (const i of all) {
+    if (i.variantId === null && i.pluralForm === null) baseText.set(i.id, i.text);
+  }
+
+  // groups: sourceText → Map(translation → [{id, projectId}])
+  const groups = new Map();
+  for (const i of all) {
+    if (i.variantId !== variantId || i.status !== "FINAL" || i.pluralForm !== null) continue;
+    if (excluded.has(i.projectId)) continue;
+    // Skip non-translations even at FINAL: empty, or an untranslated placeholder
+    // like "[AR-TODO] ..." / "[EN-TODO] ..." (Ditto's not-yet-translated marker).
+    if (!i.text || !i.text.trim()) continue;
+    if (/^\s*\[[a-z]{2,3}-todo\]/i.test(i.text)) continue;
+    const source = baseText.get(i.id);
+    if (source === undefined) continue;
+    if (!groups.has(source)) groups.set(source, new Map());
+    const byTr = groups.get(source);
+    if (!byTr.has(i.text)) byTr.set(i.text, []);
+    byTr.get(i.text).push({ id: i.id, projectId: i.projectId ?? "?" });
+  }
+
+  // A source with one agreed translation → memory. More than one → conflict
+  // (kept OUT of memory until resolved).
+  const memory = []; // {source, translation, refs}
+  const conflicts = []; // {source, options:[{translation, refs}]}
+  for (const [source, byTr] of groups) {
+    if (byTr.size === 1) {
+      const [translation, refs] = [...byTr.entries()][0];
+      memory.push({ source, translation, refs });
+    } else {
+      conflicts.push({
+        source,
+        options: [...byTr.entries()].map(([translation, refs]) => ({ translation, refs })),
+      });
+    }
+  }
+  memory.sort((a, b) => a.source.localeCompare(b.source));
+  conflicts.sort((a, b) => a.source.localeCompare(b.source));
+  return { memory, conflicts };
+}
+
+// Building the index costs one whole-workspace fetch, and a translation run
+// looks up several batches back to back — so keep it in-process rather than
+// re-fetching per batch. refresh_translation_assets clears it on rebuild.
+const MEMORY_CACHE = new Map(); // key → {at, index}
+const MEMORY_TTL_MS = 10 * 60 * 1000;
+const memoryCacheKey = (variantId, excluded) => `${variantId}::${[...excluded].sort().join(",")}`;
+
+async function getMemoryIndex(variantId, excluded, refresh = false) {
+  const key = memoryCacheKey(variantId, excluded);
+  const hit = MEMORY_CACHE.get(key);
+  if (!refresh && hit && Date.now() - hit.at < MEMORY_TTL_MS) return { ...hit.index, cached: true };
+  const index = await buildMemoryIndex(variantId, excluded);
+  MEMORY_CACHE.set(key, { at: Date.now(), index });
+  return { ...index, cached: false };
+}
+
+// Fold a source string to comparable tokens: case-insensitive, punctuation-free,
+// with every {{placeholder}} and literal amount/number collapsed to one "№"
+// token — so "Includes {{interest_amount}} interest" and "Includes ď50.00
+// interest" read as the same sentence carrying a different value.
+function memoryTokens(s) {
+  const n = (s || "")
+    .toLowerCase()
+    .replace(/\{\{[^}]*\}\}/g, " № ")
+    .replace(/[ďđ$€£¥₹]\s*[\d,]+(?:\.\d+)?/g, " № ")
+    .replace(/\b[\d,]+(?:\.\d+)?\b/g, " № ")
+    .replace(/[^\p{L}\p{N}№]+/gu, " ")
+    .trim();
+  return n ? n.split(" ") : [];
+}
+
+// A string's unigram + bigram bags, counted (not de-duplicated) so repeated
+// tokens still carry weight. Built once per memory row, reused for every source.
+function memoryProfile(s) {
+  const tokens = memoryTokens(s);
+  const bag = (list) => {
+    const m = new Map();
+    for (const t of list) m.set(t, (m.get(t) ?? 0) + 1);
+    return { counts: m, size: list.length };
+  };
+  const bigrams = [];
+  for (let i = 1; i < tokens.length; i++) bigrams.push(`${tokens[i - 1]} ${tokens[i]}`);
+  return { uni: bag(tokens), bi: bag(bigrams) };
+}
+
+// Dice over counted bags: 2·|A∩B| / (|A|+|B|), intersection summing min(count).
+function bagDice(a, b) {
+  if (!a.size || !b.size) return 0;
+  const [small, large] = a.counts.size <= b.counts.size ? [a, b] : [b, a];
+  let shared = 0;
+  for (const [t, n] of small.counts) shared += Math.min(n, large.counts.get(t) ?? 0);
+  return (2 * shared) / (a.size + b.size);
+}
+
+// Blend unigram and bigram similarity. Unigrams alone are order-blind, which
+// ties genuinely different strings at 1.0 — "Includes {{amount}} interest" and
+// "Includes interest {{amount}}" share every word. The bigram half restores
+// enough word order to rank the real precedent first. Strings too short to have
+// a bigram fall back to the unigram score rather than being penalised to half.
+function diceScore(a, b) {
+  const uni = bagDice(a.uni, b.uni);
+  if (!a.bi.size || !b.bi.size) return uni;
+  return 0.5 * uni + 0.5 * bagDice(a.bi, b.bi);
+}
+
 // ─── SHARED MARKDOWN TABLE STYLE ─────────────────────────────────────────────
 // One table style for every generated .md (memory, conflicts, review sheets) so
 // the output looks identical no matter which tool or client produced it.
@@ -229,7 +346,7 @@ function mdTable(headers, rows, wrapCols = [], maxWidth = MD_WRAP) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.14.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.16.0" });
 
 server.registerTool(
   "list_projects",
@@ -791,43 +908,9 @@ server.registerTool(
   async ({ variantId, excludeProjects }) => {
     variantId = requireVariant(variantId);
     const excluded = new Set(excludeProjects ?? getExcludedProjects());
-    // No projects filter = whole workspace. Base + variant come back in one list.
-    const filter = JSON.stringify({ variants: [{ id: variantId }, { id: "base" }] });
-    const all = await dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`);
-
-    const baseText = new Map();
-    for (const i of all) {
-      if (i.variantId === null && i.pluralForm === null) baseText.set(i.id, i.text);
-    }
-
-    // Group FINAL variant translations by source text — skipping excluded projects.
-    // groups: sourceText → Map(translation → [{id, projectId}])
-    const groups = new Map();
-    for (const i of all) {
-      if (i.variantId !== variantId || i.status !== "FINAL" || i.pluralForm !== null) continue;
-      if (excluded.has(i.projectId)) continue;
-      // Skip non-translations even at FINAL: empty, or an untranslated placeholder
-      // like "[AR-TODO] ..." / "[EN-TODO] ..." (Ditto's not-yet-translated marker).
-      if (!i.text || !i.text.trim()) continue;
-      if (/^\s*\[[a-z]{2,3}-todo\]/i.test(i.text)) continue;
-      const source = baseText.get(i.id);
-      if (source === undefined) continue;
-      if (!groups.has(source)) groups.set(source, new Map());
-      const byTr = groups.get(source);
-      if (!byTr.has(i.text)) byTr.set(i.text, []);
-      byTr.get(i.text).push({ id: i.id, projectId: i.projectId ?? "?" });
-    }
-
-    // A source with one agreed translation → memory. More than one → conflict
-    // (kept OUT of memory until resolved).
-    const memory = []; // {source, translation}
-    const conflicts = []; // {source, options:[{translation, refs}]}
-    for (const [source, byTr] of groups) {
-      if (byTr.size === 1) memory.push({ source, translation: [...byTr.keys()][0] });
-      else conflicts.push({ source, options: [...byTr.entries()].map(([translation, refs]) => ({ translation, refs })) });
-    }
-    memory.sort((a, b) => a.source.localeCompare(b.source));
-    conflicts.sort((a, b) => a.source.localeCompare(b.source));
+    // Always rebuild — this tool exists to pick up newly-approved copy — and
+    // seed the shared cache so a lookup right after a refresh is free.
+    const { memory, conflicts } = await getMemoryIndex(variantId, excluded, true);
 
     const memDir = path.join(ASSETS, variantId);
     fs.mkdirSync(memDir, { recursive: true });
@@ -884,6 +967,120 @@ server.registerTool(
           note: conflicts.length
             ? `${conflicts.length} conflicts held out of memory — see the conflicts file, resolve, then re-refresh.`
             : "No conflicts — memory is complete.",
+        }, null, 2),
+      }],
+    };
+  },
+);
+
+server.registerTool(
+  "lookup_translation_memory",
+  {
+    title: "Look up translation memory",
+    description:
+      "Look up source strings in the variant's translation memory and get back only the rows that matter — the " +
+      "reuse step of the translation loop, without reading the memory file. Pass a whole batch of sources in " +
+      "one call. Each result is one of: 'exact' (reuse that translation verbatim), 'near' (scored candidates " +
+      "sharing the phrase or terms — mirror their wording and locked terms rather than inventing new phrasing), " +
+      "'conflict' (approved copy EXISTS but the workspace disagrees with itself — do not reuse blindly; resolve " +
+      "or skip), or 'none' (translate from scratch). Matching ignores case, punctuation and trailing spaces, and " +
+      "treats {{placeholders}} and literal amounts as interchangeable values, so 'Includes {{interest_amount}} " +
+      "interest' matches 'Includes ď50.00 interest'. PREFER THIS over reading translation-assets/{variant}/" +
+      "translation-memory.md: that file is a display rendering — long cells are hard-wrapped on '<br>' and every " +
+      "column is space-padded — so grepping it silently misses short entries and returns broken text.",
+    inputSchema: {
+      sources: z.array(z.string()).min(1)
+        .describe("Source (base) strings to look up — pass the whole batch in one call"),
+      variantId: z.string().optional().describe("Variant to look up (default: configured default variant)"),
+      nearLimit: z.number().int().min(0).max(10).default(3)
+        .describe("Max near matches per source (0 = exact matches only)"),
+      minScore: z.number().min(0).max(1).default(0.45)
+        .describe("Similarity threshold for near matches, 0-1 (lower = more, noisier candidates)"),
+      refresh: z.boolean().default(false)
+        .describe("Rebuild the index instead of reusing the ~10 min in-process cache"),
+      excludeProjects: z.array(z.string()).optional()
+        .describe("Project dev IDs to skip (default: the configured excluded/test projects)"),
+    },
+  },
+  async ({ sources, variantId, nearLimit, minScore, refresh, excludeProjects }) => {
+    variantId = requireVariant(variantId);
+    const excluded = new Set(excludeProjects ?? getExcludedProjects());
+    const { memory, conflicts, cached } = await getMemoryIndex(variantId, excluded, refresh);
+
+    // Exact lookup, then trimmed — trailing-space variants of the same string are
+    // everywhere in Figma-sourced copy ("Recent beneficiaries ").
+    const byExact = new Map();
+    const byTrim = new Map();
+    for (const m of memory) {
+      if (!byExact.has(m.source)) byExact.set(m.source, m);
+      const t = m.source.trim();
+      if (!byTrim.has(t)) byTrim.set(t, m);
+    }
+    const conflictByTrim = new Map();
+    for (const c of conflicts) {
+      const t = c.source.trim();
+      if (!conflictByTrim.has(t)) conflictByTrim.set(t, c);
+    }
+    // Profiles are built once for the whole memory, not per source string.
+    const tokenized = nearLimit > 0
+      ? memory.map((m) => ({ m, profile: memoryProfile(m.source) }))
+      : [];
+
+    const refLabel = (refs) => refs.slice(0, 5).map((r) => `${r.id}@${r.projectId}`);
+
+    const results = [];
+    for (const source of sources) {
+      const hit = byExact.get(source) ?? byTrim.get(source.trim());
+      if (hit) {
+        results.push({
+          source,
+          match: "exact",
+          translation: hit.translation,
+          ...(hit.source === source ? {} : { memorySource: hit.source }),
+          usedBy: refLabel(hit.refs),
+        });
+        continue;
+      }
+      const clash = conflictByTrim.get(source.trim());
+      if (clash) {
+        results.push({
+          source,
+          match: "conflict",
+          note: "More than one FINAL translation exists for this source — resolve it or skip; don't pick one silently.",
+          options: clash.options.map((o) => ({ translation: o.translation, usedBy: refLabel(o.refs) })),
+        });
+        continue;
+      }
+      const tok = memoryProfile(source);
+      const near = tokenized
+        .map(({ m, profile }) => ({ m, score: diceScore(tok, profile) }))
+        .filter((x) => x.score >= minScore)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, nearLimit)
+        .map((x) => ({
+          memorySource: x.m.source,
+          translation: x.m.translation,
+          score: Number(x.score.toFixed(2)),
+        }));
+      results.push(near.length ? { source, match: "near", near } : { source, match: "none" });
+    }
+
+    const tally = (k) => results.filter((r) => r.match === k).length;
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          variantId,
+          memoryEntries: memory.length,
+          conflictEntries: conflicts.length,
+          indexCached: cached,
+          counts: {
+            exact: tally("exact"),
+            near: tally("near"),
+            conflict: tally("conflict"),
+            none: tally("none"),
+          },
+          results,
         }, null, 2),
       }],
     };
@@ -1056,7 +1253,10 @@ server.registerTool(
       "existing item are connected to it, new texts become WIP items (created + connected), and texts matching " +
       "a library component are additionally linked to that component. Returns created items with their " +
       "auto-generated developer IDs and screen (frame) names — use rename_developer_id afterwards to give the " +
-      "new items semantic IDs. UNOFFICIAL: uses Ditto's internal backend (session token — login_to_ditto) plus " +
+      "new items semantic IDs. Verifies each connect actually persisted (the unofficial backend can return 200 " +
+      "while silently dropping instances) and auto-retries once; any items whose copy still didn't land under a " +
+      "frame are reported in counts.floating (+ a floating list) — floating > 0 means the link is incomplete. " +
+      "UNOFFICIAL: uses Ditto's internal backend (session token — login_to_ditto) plus " +
       "the Figma REST API (FIGMA_API_KEY env). The Figma URL must be a 'Copy link to selection' link with a " +
       "node-id; the target project must already contain at least one text item.",
     inputSchema: {
@@ -1167,20 +1367,48 @@ server.registerTool(
 
     // 7. Re-fetch for the auto-assigned dev IDs of created items, and map each
     //    to its screen (frame name) — context for semantic rename suggestions.
-    const after = await fetchWorkspaceDump();
-    const byMongoId = new Map(after.filter((i) => i.doc_ID === mongoProjectId).map((i) => [i._id, i]));
+    let after = await fetchWorkspaceDump();
+    let byMongoId = new Map(after.filter((i) => i.doc_ID === mongoProjectId).map((i) => [i._id, i]));
+
+    // 7b. Guardrail: the connect endpoint is unversioned and will return 200 while
+    //     silently persisting NOTHING (e.g. a stale figmaPageId — see resolvePageId).
+    //     Never trust the 200: re-read each item and confirm its instances actually
+    //     landed. Retry the connect once for anything still empty. Whatever remains
+    //     empty is genuinely floating (e.g. the node is already claimed elsewhere)
+    //     and is surfaced in the report rather than passed off as linked.
+    const persistedCount = (mongoId) =>
+      byMongoId.get(mongoId)?.integrations?.figmaV2?.instances?.length || 0;
+    if (totalInstances) {
+      const stillEmpty = Object.fromEntries(
+        Object.entries(instancesByItemId).filter(([id]) => persistedCount(id) === 0),
+      );
+      if (Object.keys(stillEmpty).length) {
+        try {
+          await connectTextItems(mongoProjectId, stillEmpty);
+          after = await fetchWorkspaceDump();
+          byMongoId = new Map(after.filter((i) => i.doc_ID === mongoProjectId).map((i) => [i._id, i]));
+        } catch { /* report whatever persisted below */ }
+      }
+    }
+
     const createdReport = created.map(({ item, instances }) => ({
       devId: byMongoId.get(item._id)?.developerId || null,
       text: item.text,
       screen: instances[0]?.frameName || "Unknown",
       instances: instances.length,
+      persisted: persistedCount(item._id),
     }));
     const linkedReport = toLink.map(({ item, instances }) => ({
       devId: item.developerId,
       text: item.text.slice(0, 80),
       screen: instances[0]?.frameName || "Unknown",
       instances: instances.length,
+      persisted: persistedCount(item._id),
     }));
+    // Items we created but whose Figma instances never persisted — floating copy.
+    const floating = createdReport
+      .filter((c) => c.persisted === 0)
+      .map((c) => ({ devId: c.devId, text: c.text.slice(0, 60), screen: c.screen }));
 
     return {
       content: [
@@ -1199,9 +1427,11 @@ server.registerTool(
                 createFailed: createFailed.length,
                 ambiguousSkipped: ambiguous.length,
                 instancesConnected: totalInstances,
+                floating: floating.length,
               },
               created: createdReport,
               connectedToExisting: linkedReport,
+              ...(floating.length ? { floating } : {}),
               ...(ambiguous.length ? { ambiguous } : {}),
               ...(createFailed.length ? { createFailed } : {}),
               ...(componentLinks.length ? { componentLinks } : {}),

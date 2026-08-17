@@ -5,6 +5,24 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-08-17
+
+### Added
+
+- **`lookup_translation_memory(sources[], variantId?)`** — the reuse step of the translation loop as a tool instead of a file read. Takes a batch of source strings, returns only the rows that matter: `exact` (reuse verbatim), `near` (scored, ranked candidates to mirror), `conflict`, or `none`. Matching is case-, punctuation- and trailing-space-insensitive, and collapses `{{placeholders}}` and literal amounts to a common token, so `Includes ď50.00 interest` finds `Includes {{interest_amount}} interest`. Near-match scoring blends unigram and bigram Dice over counted token bags — the bigram half restores enough word order that `Includes {{amount}} interest` outranks `Includes interest {{amount}}` instead of tying at 1.0.
+- **Conflicting sources are now reachable.** A source whose FINAL translations disagree across the workspace is deliberately held out of `translation-memory.md`, which meant a translator reading that file saw *nothing* and translated from scratch — silently forking terminology a third way. `lookup_translation_memory` returns these as `match: "conflict"` with every rival translation and its dev IDs. (Live example: `Continue` in `ar` has four, including the `يكمل` third-person form that `ar-voice-rules.md` §3 flags as P0.)
+
+### Changed
+
+- **`/ditto-translate` step 4 now calls the tool instead of reading `translation-memory.md`,** and both the procedure and the Rules say why: the file is a *display* rendering — long cells hard-wrapped on `<br>`, every column space-padded — so grep-based lookup silently misses short entries. Verified: a padded-column grep found none of `Send`, `Pay`, `Add`, `Home`, `Calls`, `Chats`, `To do`, `View all`; the tool returns all eight as exact matches. For `ar` this also replaces reading a 375 KB file with a response carrying only the batch's rows.
+- **Memory-index construction extracted into one shared builder** (`buildMemoryIndex`) used by both `refresh_translation_assets` and `lookup_translation_memory`, so the two can't drift on what counts as memory versus conflict. The index is cached in-process for ~10 min (≈3.5 s cold, ≈5 ms warm) since a translation run looks up several batches back to back; `refresh_translation_assets` always rebuilds and reseeds it, and `refresh: true` forces it.
+
+### Fixed
+
+- **`figma_link_pass` no longer leaves copy floating.** Two independent bugs. (1) A single-node Figma fetch never includes the `CANVAS` ancestor, so the tree walk couldn't learn the real page and stamped every node with a hardcoded `"0:1"` — wrong for any frame not on the first page, and Ditto's `connect` validates frame-on-page (strictly on mature projects, laxly on playgrounds), so instances were silently rejected. `resolvePageId` now resolves the true page once per selection (`GET /v1/files/{key}?ids={node}&depth=2` → the single CANVAS returned with children) and stamps it on every node. (2) The unofficial `connect` endpoint can return 200 while persisting nothing, so the tool no longer trusts the status code: it re-reads each item, confirms `integrations.figmaV2.instances` actually landed, retries the connect once for anything still empty, and reports whatever remains as `counts.floating` plus a `floating` list. Ditto groups by `figmaV2.instances`, not `blockId`.
+- **`/ditto-handoff` gained a floating guardrail.** Step 1 now requires `counts.floating === 0` before continuing, with the diagnosis path and workaround inline — shipping unlinked copy straight to FINAL is worse than pausing.
+- Version strings were out of sync across `package.json` (0.15.0), `mcp-server.js`, `plugin/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` (all 0.14.0). All four now read 0.16.0.
+
 ## [0.15.0] - 2026-07-23
 
 ### Added

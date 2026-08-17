@@ -73,7 +73,29 @@ export async function getFigmaTextNodes(fileKey, nodeId) {
   for (const entry of Object.values(data.nodes || {})) {
     if (entry?.document) walk(entry.document, nodes, { pageId: null, frameId: null, frameName: null });
   }
+  // A single-node fetch never includes the CANVAS ancestor, so `walk` can't learn
+  // the real page and every node falls back to "0:1" — wrong for any frame not on
+  // the first page, which breaks Ditto's frame grouping (it keys on figmaPageId).
+  // Resolve the true page once (a selection lives on exactly one page) and stamp it.
+  if (nodes.length) {
+    const realPageId = await resolvePageId(fileKey, nodeId);
+    if (realPageId) for (const n of nodes) n.pageId = realPageId;
+  }
   return nodes;
+}
+
+// The page (CANVAS) a selection lives under. The file endpoint with `ids=` only
+// expands the subtree that leads to the requested node, so among all canvases
+// exactly one comes back with children — that's the page. Best-effort: on any
+// failure we leave the walk's fallback pageId in place rather than throw.
+async function resolvePageId(fileKey, nodeId) {
+  try {
+    const data = await figmaFetch(`/v1/files/${fileKey}?ids=${encodeURIComponent(nodeId)}&depth=2`);
+    const canvases = (data.document?.children || []).filter((c) => c.type === "CANVAS");
+    return canvases.find((c) => (c.children || []).length > 0)?.id || null;
+  } catch {
+    return null;
+  }
 }
 
 function walk(node, results, ctx) {

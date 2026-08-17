@@ -22,6 +22,7 @@ Works with any Ditto workspace — auth is your own workspace API key. A few ext
 | `list_components(folderId?)` | The workspace's component library (shared strings) — check before writing new copy |
 | `search_text(query, projectId?, limit=50)` | Substring search over base items + components — find existing copy to reuse, or locate where a string lives |
 | `refresh_translation_assets(variantId?)` | Build the translation memory from FINAL (expert-approved) translations workspace-wide — one clean table of source→translation to reuse before translating; sources with conflicting FINAL translations are held out into a separate `translation-conflicts.md` (with dev IDs + projects) to resolve. Skips configured test/sandbox projects and `[XX-TODO]` placeholders |
+| `lookup_translation_memory(sources[], variantId?, nearLimit=3, minScore=0.45)` | Look up a batch of source strings in the memory and get back only the rows that matter: `exact` (reuse verbatim), `near` (scored candidates to mirror), `conflict` (approved copy exists but the workspace disagrees — don't reuse blindly), or `none`. Matching ignores case, punctuation and trailing spaces and treats `{{placeholders}}` and literal amounts as interchangeable, so `Includes ď50.00 interest` finds `Includes {{interest_amount}} interest`. Use this instead of reading `translation-memory.md` — that file is a *display* rendering whose `<br>` wrapping and column padding make grep-based lookup silently wrong. Index is cached in-process for ~10 min |
 
 ### Unofficial backend tools (session login)
 

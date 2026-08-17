@@ -41,30 +41,50 @@ Wherever `variantId` is omitted, the default variant applies (config file, or `D
 
 ## Skills
 
-Two Claude Code skills ship in `.claude/skills/`, encoding the standard playbooks so a whole workflow is one command instead of a paragraph:
+Three Claude Code skills ship in `plugin/skills/`, encoding the standard playbooks so a whole workflow is one command instead of a paragraph:
 
 | Skill | What it does |
 |---|---|
-| `/ditto-handoff [figmaUrl] [projectId] [variantId]` | Full Figma→Ditto handoff, autonomous end-to-end: paste a frame link → copy linked into the project → semantic developer IDs applied → hardcoded values variablised → glossary-aware translation into a variant if one is mentioned ("…and add Arabic") → the whole batch staged at REVIEW. Nothing goes FINAL automatically — the human review happens after |
-| `/ditto-translate [projectId] [variantId]` | Full translation loop: refresh assets → read the glossary → translate in batches with self-review → write back as WIP → report written + skipped |
-| `/ditto-review [projectId] [variantId]` | Reviewer loop: present pending translations against their base text in batches; approve/edit/skip; edits and approvals become FINAL; refreshes the translation memory afterwards |
+| `/ditto-handoff [figmaUrl] [projectId] [variantId]` | Full Figma→Ditto handoff, autonomous end-to-end: paste a frame link → copy linked into the project and *verified* as non-floating → semantic developer IDs applied across new **and** pre-existing items → hardcoded values variablised → glossary-aware translation into a variant if one is mentioned ("…and add Arabic") → the whole batch set to FINAL → project re-audited rather than trusting the step reports. There is no review gate in this flow, so it skips anything ambiguous and flags it in the report instead of guessing |
+| `/ditto-translate [projectId] [variantId]` | Full translation loop: refresh assets → read the glossary → translate in batches with self-review → write back at FINAL → report written + every skipped item with its reason |
+| `/ditto-review [projectId] [variantId]` | Reviewer loop, interactively in chat or as a Markdown sheet handed to a human translator: a flag-only guardrail pass against the Ditto style guide and local glossary/voice rules → approve/edit/skip → edits and approvals become FINAL → translation memory refreshed, and recurring reviewer corrections pushed back to the style guide as durable rules |
 
-They load automatically with the plugin install below (or when you open Claude Code in this repo). With the standalone MCP install, copy the skill folders to `~/.claude/skills/` to have them everywhere.
+They load automatically with the plugin install below. With a standalone MCP install, copy the folders from `plugin/skills/` into `~/.claude/skills/` to have them everywhere.
 
 ## Setup
 
 **Prerequisites:** Node.js 18+, a Ditto workspace API key (Ditto → workspace settings → API).
 
-### Claude Code plugin (recommended — tools + skills + guided key setup)
-
-Installs the MCP server *and* both skills in one step, and prompts for your API key:
+### Claude Code plugin (recommended — tools + all three skills)
 
 ```
 /plugin marketplace add gojenaya/ditto-workflows-mcp
 /plugin install ditto-workflows@ditto-workflows-mcp
 ```
 
-You'll be asked for your Ditto API key (and, optionally, a default variant) during install — no manual config editing. The server itself runs via `npx`, so it stays up to date.
+Then add your keys — `/plugin` → **Ditto Workflows** → **Configure**:
+
+| Field | |
+|---|---|
+| **Ditto API key** | required — Ditto → workspace settings → API |
+| **Default variant** | optional — e.g. `ar`; or call `set_default_variant` once instead |
+| **Figma API key** | only needed for `figma_link_pass` — figma.com → Settings → Security → personal access token, *File content: read* scope |
+
+Run `/reload-plugins`, then check that `/mcp` lists **ditto-workflows** as connected. The server runs via `npx`, so it stays up to date.
+
+> **If the server reports `missing DITTO_API_KEY`,** the Configure screen saved a blank config — it doesn't reliably persist what you type, even when it says "Configuration saved". Add the entry to `~/.claude/settings.json` yourself:
+>
+> ```json
+> "pluginConfigs": {
+>   "ditto-workflows@ditto-workflows-mcp": {
+>     "ditto_api_key": "<your key>",
+>     "ditto_default_variant": "ar",
+>     "figma_api_key": "<your figma token>"
+>   }
+> }
+> ```
+>
+> Then `/reload-plugins` again. Keys live in your own user settings — never in a repo.
 
 ### npx (MCP server only, no clone)
 
@@ -74,10 +94,11 @@ You'll be asked for your Ditto API key (and, optionally, a default variant) duri
 claude mcp add ditto-workflows -s user \
   -e DITTO_API_KEY=<your key> \
   -e DITTO_DEFAULT_VARIANT=<variant> \
+  -e FIGMA_API_KEY=<your figma token> \
   -- npx -y ditto-workflows-mcp@latest
 ```
 
-(`DITTO_DEFAULT_VARIANT` is optional — you can call `set_default_variant` once instead.)
+Only `DITTO_API_KEY` is required. `DITTO_DEFAULT_VARIANT` is optional (or call `set_default_variant` once instead), and `FIGMA_API_KEY` is only needed for `figma_link_pass` — a Figma personal access token with *File content: read* scope, from figma.com → Settings → Security.
 
 **Other MCP clients** (Claude Desktop, Cursor, Windsurf, …) — add to the client's MCP config:
 
@@ -89,7 +110,8 @@ claude mcp add ditto-workflows -s user \
       "args": ["-y", "ditto-workflows-mcp@latest"],
       "env": {
         "DITTO_API_KEY": "<your key>",
-        "DITTO_DEFAULT_VARIANT": "<variant>"
+        "DITTO_DEFAULT_VARIANT": "<variant>",
+        "FIGMA_API_KEY": "<your figma token>"
       }
     }
   }
@@ -103,6 +125,7 @@ git clone https://github.com/gojenaya/ditto-workflows-mcp && cd ditto-workflows-
 npm install
 echo 'DITTO_API_KEY=<your key>' > .env         # loaded by the server itself
 echo 'DITTO_DEFAULT_VARIANT=<variant>' >> .env # optional
+echo 'FIGMA_API_KEY=<your figma token>' >> .env # optional — only for figma_link_pass
 claude mcp add ditto-workflows -s user -- node "$PWD/mcp-server.js"
 ```
 

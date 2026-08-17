@@ -5,6 +5,20 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1] - 2026-08-17
+
+Documentation only — no server or skill behaviour changed.
+
+### Fixed
+
+- **The README's Skills table described the opposite of what the skills do.** It listed two skills instead of three, pointed at `.claude/skills/` (they moved to `plugin/skills/` in 0.10b), and claimed `/ditto-handoff` staged the batch at REVIEW with "nothing goes FINAL automatically" and that `/ditto-translate` wrote back as WIP. Both write FINAL directly — there is no review gate in this variant. `/ditto-review`'s entry also now mentions the style-guide guardrail, the Markdown review-sheet mode and the feedback loop added in 0.15.0–0.16.0.
+- **Setup told users the plugin install would prompt for their API key.** It doesn't reliably: the install completes silently, and the `/plugin` → Configure screen can report "Configuration saved" while writing an empty `pluginConfigs` entry — leaving the server dead with `missing DITTO_API_KEY` and no obvious cause. The plugin section now covers install and key entry as separate steps and documents the manual `~/.claude/settings.json` fallback. (Both manifests pass `claude plugin validate`, so the `userConfig` declaration is not at fault.)
+- **`FIGMA_API_KEY` was undocumented outside a tool-table cell.** None of the Setup routes mentioned it, so anyone not using the plugin had nowhere to put it and `figma_link_pass` simply failed. Added to the `claude mcp add`, MCP-client JSON and clone `.env` snippets, with the required *File content: read* scope.
+
+### Changed
+
+- Plugin and marketplace descriptions now list `/ditto-handoff` — the main entry point, previously missing from both — and drop the "prompts for your Ditto API key on install" claim.
+
 ## [0.17.0] - 2026-08-17
 
 ### Fixed

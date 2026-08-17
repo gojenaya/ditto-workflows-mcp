@@ -1,8 +1,8 @@
 {
   "name": "ditto-workflows",
   "displayName": "Ditto Workflows",
-  "version": "0.17.0",
-  "description": "Drive Ditto (dittowords.com) copy & translation workflows from Claude — MCP tools plus the /ditto-translate and /ditto-review skills. The server runs via npx; you're prompted for your Ditto API key on install.",
+  "version": "0.17.1",
+  "description": "Drive Ditto (dittowords.com) copy & translation workflows from Claude — MCP tools plus the /ditto-handoff, /ditto-translate and /ditto-review skills. The server runs via npx; add your Ditto API key via /plugin → Ditto Workflows → Configure after installing.",
   "author": { "name": "gojenaya", "url": "https://github.com/gojenaya" },
   "homepage": "https://github.com/gojenaya/ditto-workflows-mcp",
   "repository": "https://github.com/gojenaya/ditto-workflows-mcp",

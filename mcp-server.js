@@ -164,10 +164,30 @@ const DYNAMIC_PATTERNS = [
   // Currency code before OR after the number: "AED 8.00" and "8.00 AED".
   { pattern: /\b(AED|USD|EUR|GBP|SAR|INR|PKR|PHP)\s*[\d,]+(\.\d{1,2})?/i, type: "amount" },
   { pattern: /\b[\d,]+(\.\d{1,2})?\s*(AED|USD|EUR|GBP|SAR|INR|PKR|PHP)\b/i, type: "amount" },
+  // Bare formatted amounts with no currency marker at all — "10,000.00",
+  // "15.1899". Very common when the currency sits in its own text layer.
+  { pattern: /\b\d{1,3}(,\d{3})+(\.\d+)?\b/, type: "amount" },
+  { pattern: /\b\d+\.\d{2,}\b/, type: "amount" },
   { pattern: /\b\d+(\.\d+)?%/, type: "percentage" },
   { pattern: /[•*]{4}\s*\d{4}/, type: "card_last4" },
+  // Card last-4 in parentheses — "Debit card (4563)", "(8122)".
+  { pattern: /\(\s*\d{4}\s*\)/, type: "card_last4" },
+  // Reference/transaction IDs — "#000002798236526", "Ref: 8829104".
+  { pattern: /#\s*\d{6,}/, type: "reference_id" },
+  { pattern: /\b(ref|txn|transaction|order|invoice)[\s.:#-]*\d{5,}\b/i, type: "reference_id" },
+  // Bare long digit runs (IDs, account/wallet numbers) that aren't years.
+  { pattern: /\b\d{7,}\b/, type: "reference_id" },
+  // Country dial codes — "+63", "+971".
+  { pattern: /(^|\s)\+\d{1,4}\b/, type: "dial_code" },
   { pattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/, type: "email" },
 ];
+
+// The unofficial connect endpoint returns 200 while silently dropping most of a
+// large payload. Send it in small batches and re-verify; both numbers are
+// empirical (batches of 5 persisted 100% where a single ~50-instance PATCH
+// persisted ~20%).
+const CONNECT_BATCH_SIZE = 5;
+const CONNECT_RETRIES = 3;
 
 // Design-mock status-bar times ("9:41") are dynamic-looking but never real copy.
 function isStatusBarTime(text) {
@@ -346,7 +366,7 @@ function mdTable(headers, rows, wrapCols = [], maxWidth = MD_WRAP) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.16.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.17.0" });
 
 server.registerTool(
   "list_projects",
@@ -871,6 +891,30 @@ server.registerTool(
       return { content: [{ type: "text", text: "No matching items to update." }] };
     }
 
+    // Promoting a variant that doesn't exist yet CREATES it with empty text —
+    // so a status sweep can mint blank copy at FINAL. Only ever touch variant
+    // rows that already hold text. (The fromStatus path above derives its ids
+    // from real variant rows, but an explicit `ids` list can name anything.)
+    let noVariant = [];
+    if (variantId) {
+      const filter = JSON.stringify({ projects: [{ id: projectId }], variants: [{ id: variantId }] });
+      const rows = await dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`);
+      const translated = new Set(
+        rows.filter((i) => i.variantId === variantId && i.pluralForm === null && i.text?.trim()).map((i) => i.id),
+      );
+      noVariant = targetIds.filter((id) => !translated.has(id));
+      targetIds = targetIds.filter((id) => translated.has(id));
+      if (!targetIds.length) {
+        return {
+          content: [{
+            type: "text",
+            text: `No '${variantId}' variants to update — ${noVariant.length} requested ID(s) have no ` +
+              `translated text yet, and promoting them would create empty ${variantId} copy: ${noVariant.join(", ")}`,
+          }],
+        };
+      }
+    }
+
     const { updated, skipped } = await patchSkippingUnknown({
       ...(variantId ? { variantId } : {}),
       updates: targetIds.map((id) => ({ developerId: id, status, projectId })),
@@ -881,7 +925,11 @@ server.registerTool(
       content: [{
         type: "text",
         text: `Set ${updated} ${target} → ${status}.` +
-          (skipped.length ? ` Skipped ${skipped.length} unknown ID(s): ${skipped.join(", ")}` : ""),
+          (skipped.length ? ` Skipped ${skipped.length} unknown ID(s): ${skipped.join(", ")}` : "") +
+          (noVariant.length
+            ? ` Skipped ${noVariant.length} ID(s) with no '${variantId}' translation yet (promoting them ` +
+              `would have created empty copy): ${noVariant.join(", ")}`
+            : ""),
       }],
     };
   },
@@ -1334,7 +1382,16 @@ server.registerTool(
       }));
     }
     const totalInstances = Object.values(instancesByItemId).reduce((a, arr) => a + arr.length, 0);
-    if (totalInstances) await connectTextItems(mongoProjectId, instancesByItemId);
+    // The connect endpoint returns 200 while silently persisting only a fraction
+    // of a large payload — one PATCH for ~50 instances saved ~12. Small batches
+    // persist reliably, so never send it in one shot. (Verification + retry for
+    // whatever still didn't land happens in step 7b.)
+    if (totalInstances) {
+      const entries = Object.entries(instancesByItemId);
+      for (let i = 0; i < entries.length; i += CONNECT_BATCH_SIZE) {
+        await connectTextItems(mongoProjectId, Object.fromEntries(entries.slice(i, i + CONNECT_BATCH_SIZE)));
+      }
+    }
 
     // 6. Component links: texts that also exist as library components get
     //    linked to them (skipping items already linked — idempotent).
@@ -1372,22 +1429,27 @@ server.registerTool(
 
     // 7b. Guardrail: the connect endpoint is unversioned and will return 200 while
     //     silently persisting NOTHING (e.g. a stale figmaPageId — see resolvePageId).
-    //     Never trust the 200: re-read each item and confirm its instances actually
-    //     landed. Retry the connect once for anything still empty. Whatever remains
-    //     empty is genuinely floating (e.g. the node is already claimed elsewhere)
-    //     and is surfaced in the report rather than passed off as linked.
+    //     Never trust the 200: re-read every item and confirm its instances actually
+    //     landed, then re-send anything short (in batches again) up to CONNECT_RETRIES
+    //     times. Whatever is still short is genuinely floating (e.g. the node is
+    //     already claimed elsewhere) and is surfaced in the report rather than
+    //     passed off as linked. "Short" means FEWER instances than we sent, not just
+    //     zero — a partially persisted item is as broken as an unlinked one.
     const persistedCount = (mongoId) =>
       byMongoId.get(mongoId)?.integrations?.figmaV2?.instances?.length || 0;
     if (totalInstances) {
-      const stillEmpty = Object.fromEntries(
-        Object.entries(instancesByItemId).filter(([id]) => persistedCount(id) === 0),
-      );
-      if (Object.keys(stillEmpty).length) {
+      const shortItems = () =>
+        Object.entries(instancesByItemId).filter(([id, arr]) => persistedCount(id) < arr.length);
+      for (let attempt = 0; attempt < CONNECT_RETRIES; attempt++) {
+        const todo = shortItems();
+        if (!todo.length) break;
         try {
-          await connectTextItems(mongoProjectId, stillEmpty);
+          for (let i = 0; i < todo.length; i += CONNECT_BATCH_SIZE) {
+            await connectTextItems(mongoProjectId, Object.fromEntries(todo.slice(i, i + CONNECT_BATCH_SIZE)));
+          }
           after = await fetchWorkspaceDump();
           byMongoId = new Map(after.filter((i) => i.doc_ID === mongoProjectId).map((i) => [i._id, i]));
-        } catch { /* report whatever persisted below */ }
+        } catch { break; /* report whatever persisted below */ }
       }
     }
 
@@ -1405,10 +1467,20 @@ server.registerTool(
       instances: instances.length,
       persisted: persistedCount(item._id),
     }));
-    // Items we created but whose Figma instances never persisted — floating copy.
-    const floating = createdReport
-      .filter((c) => c.persisted === 0)
-      .map((c) => ({ devId: c.devId, text: c.text.slice(0, 60), screen: c.screen }));
+    // Floating = any item whose Figma instances didn't fully persist — created OR
+    // connected-to-existing. Scoping this to created items (as it once did) made
+    // `floating: 0` mean "no NEW item is floating" while most of the connected
+    // ones had silently landed nowhere.
+    const floating = [...createdReport, ...linkedReport]
+      .filter((c) => c.persisted < c.instances)
+      .map((c) => ({
+        devId: c.devId,
+        text: c.text.slice(0, 60),
+        screen: c.screen,
+        persisted: c.persisted,
+        expected: c.instances,
+      }));
+    const instancesPersisted = [...createdReport, ...linkedReport].reduce((a, c) => a + c.persisted, 0);
 
     return {
       content: [
@@ -1427,6 +1499,7 @@ server.registerTool(
                 createFailed: createFailed.length,
                 ambiguousSkipped: ambiguous.length,
                 instancesConnected: totalInstances,
+                instancesPersisted,
                 floating: floating.length,
               },
               created: createdReport,

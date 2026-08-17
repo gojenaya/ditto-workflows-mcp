@@ -5,6 +5,23 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-08-17
+
+### Fixed
+
+- **`figma_link_pass` was silently linking a fraction of a section.** On a four-frame selection it reported `floating: 0` and 56 instances connected while Ditto had persisted **12 instances across 7 items**, all on a single frame. Two compounding causes, both fixed:
+  - **The connect went out as one PATCH.** The unofficial `connect` endpoint returns `200` with `{"figmaTextNodesToUpdate":[]}` while persisting only part of a large payload. Re-sending the *identical* payload in batches of 5 persisted 100% across all four frames. The connect is now always chunked (`CONNECT_BATCH_SIZE = 5`) on both the initial pass and every retry. The endpoint is also not purely additive — a later small call was observed dropping instances from items it never mentioned — so the verify step re-reads the whole set, not just what it sent.
+  - **The guardrail was blind to three quarters of the work.** `counts.floating` was computed over `createdReport` alone, so it meant "no *newly created* item is floating" while the connect-to-existing items — 35 of 47 in the failing run — went unchecked. It now covers created *and* connected items, and counts **partial** persistence (fewer instances than sent), not just zero. Each entry reports `persisted`/`expected`, retries run up to `CONNECT_RETRIES = 3` rounds, and a new `counts.instancesPersisted` gives a direct check against `instancesConnected`.
+- **`update_status` could mint empty copy at FINAL.** Promoting a variant that doesn't exist yet *creates* it — with empty text. Passing an explicit `ids` list alongside a `variantId` therefore wrote blank approved copy for any item the translator had skipped (observed: six empty `ar`/`hi` values at FINAL). The tool now looks up which variant rows actually hold text, promotes only those, and names the rest in its response instead of silently creating them. The `fromStatus` path was already safe, since it derives its targets from real variant rows.
+- **`list_variablisation_candidates` missed most hardcoded values.** It found 3 of 14 on a real screen set. Added patterns for bare formatted amounts (`10,000.00`, `15.1899` — common when the currency sits in its own text layer), `#`-prefixed and long-digit reference IDs (`#000002798236526`), `ref/txn/order/invoice` numbers, parenthesised card last-4 (`Debit card (4563)`, `(8122)`), and country dial codes (`+63`). Verified against the missed strings with no false positives on real copy (`Send`, `Apple Pay`, `9:41`, `Recent beneficiaries`).
+
+### Changed
+
+- **`/ditto-handoff` step 2 now renames across both result lists.** It previously renamed only `created` items, so connect-to-existing items kept whatever IDs earlier passes gave them — `1000000`, `000002798236526`, `annie`, `okay-3`, `home-2` survived run after run and were never cleaned. Expect to rename more existing items than created ones.
+- **`/ditto-handoff` step 3 gained an ordering constraint and a manual-scan instruction.** Variablising rewrites item text, which breaks text-based re-matching, so it must not run over a partially-linked section. The step also now says to read the item list directly rather than trusting the detector alone — regex cannot judge semantics, so hardcoded personal names (`Transfer to Moataz`), word-form counts (`20K users`), placeholder junk (`XX AED`) and standalone currency codes still need a human eye.
+- **`/ditto-handoff` gained an audit step (new step 6)** — re-read the project and confirm instances persisted, dev IDs look semantic, no hardcoded values remain, and no variant is empty at FINAL, *before* reporting. Every step returns its own summary, and trusting those summaries is exactly what let these failures through.
+- **`/ditto-handoff` step 1** now checks `counts.floating === 0` **and** `counts.instancesPersisted === counts.instancesConnected`; step 5 prefers `fromStatus` over an explicit `ids` list when promoting variants. Two new rules document that the pipeline order is load-bearing (link → *verify* → rename → variablise → translate → FINAL) and that editing base text in the Ditto web app silently drops that item's variants.
+
 ## [0.16.0] - 2026-08-17
 
 ### Added

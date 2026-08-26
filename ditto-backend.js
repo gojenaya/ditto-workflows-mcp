@@ -170,6 +170,76 @@ export function toRichText(text) {
   return { type: "doc", content: [{ type: "paragraph", content: text ? [{ type: "text", text }] : [] }] };
 }
 
+// ─── Variables (creation via public API; LINKING only works here) ─────────────
+//
+// A linked variable is a NODE inside rich_text, not an entry in a list:
+//   {"type":"variable","attrs":{name,text,variableId,variableType}}
+// The public API's `variableIds` field is DERIVED from those nodes, which is why
+// sending it (or `variables`) on PATCH /v2/textItems is silently ignored —
+// verified 24 Aug 2026. Writing the rich-text node is the only way.
+
+// All workspace variables WITH mongo _ids. The public GET /v2/variables returns
+// `id` = the variable's NAME, not its mongo id, so it can't be used for linking.
+export async function fetchVariables() {
+  const list = await backendFetch("/variable");
+  return Array.isArray(list) ? list : list.variables || [];
+}
+
+// Split text on {{name}} placeholders and emit a rich-text doc whose
+// placeholders are variable nodes. `varsByName` comes from fetchVariables().
+// Unknown placeholder names are left as literal text and reported by the caller.
+export function toRichTextWithVariables(text, varsByName) {
+  const content = [];
+  const unresolved = [];
+  const re = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
+  let last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) content.push({ type: "text", text: text.slice(last, m.index) });
+    const v = varsByName.get(m[1]);
+    if (v) {
+      content.push({
+        type: "variable",
+        attrs: {
+          name: v.name,
+          // The web app stores the example as the node's display text.
+          text: String(v.data?.example ?? ""),
+          variableId: v._id,
+          variableType: v.type,
+        },
+      });
+    } else {
+      unresolved.push(m[1]);
+      content.push({ type: "text", text: m[0] });
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) content.push({ type: "text", text: text.slice(last) });
+  // {{...}} that can never be a variable (hyphens, dots, spaces). Silently
+  // leaving these as literal text is how unlinked placeholders got into the
+  // workspace in the first place, so surface them.
+  const malformed = [...text.matchAll(/\{\{([^}]*)\}\}/g)]
+    .map((m) => m[1].trim())
+    .filter((n) => !/^[A-Za-z0-9_]+$/.test(n));
+
+  return {
+    richText: { type: "doc", content: [{ type: "paragraph", content }] },
+    unresolved,
+    malformed,
+  };
+}
+
+// Update text + rich_text on existing items.
+//   PATCH /ditto-project/{pid}/text-items
+//   { updates: [ { textItemIds: [...], text, richText } ] }
+// NB the schema requires `textItemIds` (array) — `_id` or `textItemId` are
+// rejected with a zod error naming the right field.
+export async function updateTextItemsRich(projectMongoId, updates) {
+  return backendFetch(`/ditto-project/${projectMongoId}/text-items`, {
+    method: "PATCH",
+    body: JSON.stringify({ updates }),
+  });
+}
+
 // One POST per text — we need each created item's _id back.
 export async function createTextItem(projectMongoId, text) {
   const result = await backendFetch(`/ditto-project/${projectMongoId}/text-items`, {
@@ -273,4 +343,43 @@ export async function deleteStyleGuideRules(ruleIds) {
     method: "DELETE",
     body: JSON.stringify({ styleguideRuleIds: ruleIds }),
   });
+}
+
+// Recover what each {{placeholder}} actually replaced, by matching the item's
+// OLD text against its NEW text. "- ď425.00" + "- {{transaction_amount}}"
+// yields {transaction_amount: "ď425.00"}. Used to give a newly-created variable
+// a real example value instead of its own name — a variable whose example reads
+// "outstanding_amount" tells a designer nothing, and Ditto shows the example in
+// the UI wherever the variable is used.
+//
+// Literal segments are escaped and placeholders become lazy capture groups, so
+// the match is exact rather than fuzzy. Returns {} when the texts don't line up
+// (e.g. the copy was reworded in the same edit) — callers fall back rather than
+// guessing.
+export function deriveVariableExamples(oldText, newText) {
+  const parts = [];
+  const names = [];
+  let last = 0;
+  const re = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
+  for (const m of newText.matchAll(re)) {
+    parts.push(newText.slice(last, m.index));
+    names.push(m[1]);
+    last = m.index + m[0].length;
+  }
+  if (!names.length) return {};
+  parts.push(newText.slice(last));
+
+  const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = "^" + parts.map(esc).join("([\\s\\S]*?)") + "$";
+  const hit = oldText.match(new RegExp(pattern));
+  if (!hit) return {};
+
+  const out = {};
+  names.forEach((name, i) => {
+    const value = (hit[i + 1] ?? "").trim();
+    // First non-empty wins: a name repeated in one string should not be
+    // overwritten by a later empty capture.
+    if (value && !out[name]) out[name] = value;
+  });
+  return out;
 }

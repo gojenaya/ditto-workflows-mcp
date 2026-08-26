@@ -17,7 +17,7 @@ import { fileURLToPath } from "url";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { dittoFetch, dittoPatch } from "./ditto-api.js";
+import { dittoFetch, dittoPatch, createVariables, deleteTextItems } from "./ditto-api.js";
 import { getDefaultVariant, setDefaultVariant, getExcludedProjects, setExcludedProjects, DATA_DIR, CONFIG_PATH } from "./config.js";
 import {
   setSessionToken, getSessionToken, tokenExpiry, validateToken,
@@ -25,6 +25,10 @@ import {
   createTextItem, connectTextItems, fetchLibraryComponents, linkComponent,
   newObjectId, toRichText, TOKEN_HELP,
   listStyleGuides, listStyleGuideRules, addStyleGuideRules,
+  fetchVariables,
+  toRichTextWithVariables,
+  updateTextItemsRich,
+  deriveVariableExamples,
 } from "./ditto-backend.js";
 import { parseFigmaUrl, getFigmaTextNodes, isPlaceholder, normalizeText, FIGMA_KEY_HELP } from "./figma-api.js";
 
@@ -366,7 +370,7 @@ function mdTable(headers, rows, wrapCols = [], maxWidth = MD_WRAP) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.17.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.18.0" });
 
 server.registerTool(
   "list_projects",
@@ -1586,6 +1590,375 @@ server.registerTool(
         {
           type: "text",
           text: JSON.stringify({ projectId, counts, results }, null, 2),
+        },
+      ],
+    };
+  },
+);
+
+server.registerTool(
+  "link_variables",
+  {
+    title: "Variablise text and LINK the variables (unofficial)",
+    description:
+      "Rewrite text items to use {{variable}} placeholders AND actually link them to workspace variables — " +
+      "the thing update_text cannot do. Missing variables are created first (public API) unless createMissing " +
+      "is false. UNOFFICIAL for the linking half: a linked variable is a NODE inside the item's rich_text, and " +
+      "the public API's variableIds field is derived from it, so PATCH /v2/textItems silently ignores any " +
+      "variableIds/variables you send (verified 24 Aug 2026). This writes the rich-text node via the web app's " +
+      "internal API, so it needs a session token (login_to_ditto), not just the API key. " +
+      "Placeholder names must match /^[A-Za-z0-9_]+$/ — snake_case, no hyphens. " +
+      "Unknown placeholders are left as literal text and reported under `unresolved`.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID (e.g. from list_projects)"),
+      updates: z
+        .array(
+          z.object({
+            id: z.string().min(1).describe("Text item developer ID"),
+            text: z.string().describe("New text, using {{variable_name}} placeholders"),
+          }),
+        )
+        .min(1)
+        .describe("Items to rewrite. Unknown IDs are skipped with a reason."),
+      createMissing: z
+        .boolean()
+        .optional()
+        .describe(
+          "Create workspace variables for placeholders that don't exist yet (default true). " +
+            "New variables are type 'string', and their example value is recovered from the text " +
+            "being replaced ({{outstanding_amount}} over 'ď492.46' gets example 'ď492.46'), so the " +
+            "example is the real sample value rather than the variable's own name. Pass `examples` " +
+            "to override. Existing variables are never modified.",
+        ),
+      examples: z
+        .record(z.string())
+        .optional()
+        .describe(
+          "Optional {variableName: exampleValue} overrides for variables created by this call. " +
+            "Use when the example can't be recovered from the old text (e.g. the copy was reworded " +
+            "in the same edit) or when you want a cleaner sample than the Figma mock had.",
+        ),
+    },
+  },
+  async ({ projectId, updates, createMissing = true, examples = {} }) => {
+    const mongoProjectId = await projectMongoIdByDevId(projectId);
+    const dump = await fetchWorkspaceDump();
+
+    const idMap = new Map();
+    const oldTextById = new Map();
+    for (const it of dump) {
+      if (it.doc_ID === mongoProjectId && it.developerId) {
+        idMap.set(it.developerId, it._id);
+        oldTextById.set(it.developerId, it.text ?? "");
+      }
+    }
+
+    const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
+    const wanted = new Set();
+    for (const u of updates) {
+      for (const m of u.text.matchAll(PLACEHOLDER)) wanted.add(m[1]);
+    }
+
+    // Recover a real example value for each placeholder from the text it is
+    // replacing, so a created variable's example is 'ď492.46' and not
+    // 'outstanding_amount'. Explicit `examples` win; first item that yields a
+    // value for a name wins after that.
+    const derived = {};
+    for (const u of updates) {
+      const before = oldTextById.get(u.id);
+      if (!before) continue;
+      for (const [name, value] of Object.entries(deriveVariableExamples(before, u.text))) {
+        if (!derived[name]) derived[name] = value;
+      }
+    }
+    const exampleFor = (name) => examples[name] ?? derived[name] ?? name;
+
+    let vars = await fetchVariables();
+    let byName = new Map(vars.map((v) => [v.name, v]));
+    const created = [];
+    const createdWithoutExample = [];
+    if (createMissing) {
+      const toCreate = [...wanted].filter((n) => !byName.has(n));
+      if (toCreate.length) {
+        await createVariables(
+          toCreate.map((name) => ({
+            type: "string",
+            name,
+            data: { example: exampleFor(name) },
+          })),
+        );
+        vars = await fetchVariables();
+        byName = new Map(vars.map((v) => [v.name, v]));
+        created.push(...toCreate.map((name) => ({ name, example: exampleFor(name) })));
+        createdWithoutExample.push(...toCreate.filter((n) => exampleFor(n) === n));
+      }
+    }
+
+    const results = [];
+    const unresolvedAll = new Set();
+    const malformedAll = new Set();
+    for (const u of updates) {
+      const itemId = idMap.get(u.id);
+      if (!itemId) {
+        results.push({ id: u.id, status: "skipped", reason: "no item with this developer ID in the project" });
+        continue;
+      }
+      const { richText, unresolved, malformed } = toRichTextWithVariables(u.text, byName);
+      unresolved.forEach((n) => unresolvedAll.add(n));
+      malformed.forEach((n) => malformedAll.add(n));
+      try {
+        await updateTextItemsRich(mongoProjectId, [{ textItemIds: [itemId], text: u.text, richText }]);
+        const linked = (richText.content[0].content || []).filter((n) => n.type === "variable").length;
+        results.push({
+          id: u.id,
+          status: "updated",
+          linkedVariables: linked,
+          ...(unresolved.length ? { unresolved } : {}),
+          ...(malformed.length ? { malformed } : {}),
+        });
+      } catch (err) {
+        results.push({ id: u.id, status: "failed", reason: err.message });
+      }
+    }
+
+    // Verify against the public API, which derives variableIds from the nodes.
+    const after = new Map((await fetchBaseItems(projectId)).map((i) => [i.id, i]));
+    for (const r of results) {
+      if (r.status !== "updated") continue;
+      const it = after.get(r.id);
+      r.verified = !!it && (it.variableIds || []).length === r.linkedVariables;
+    }
+
+    const counts = results.reduce((a, r) => ((a[r.status] = (a[r.status] || 0) + 1), a), {});
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              projectId,
+              counts,
+              variablesCreated: created,
+              ...(createdWithoutExample.length
+                ? {
+                    variablesMissingExample: createdWithoutExample,
+                    variablesMissingExampleNote:
+                      "The old text didn't line up with the new placeholder text, so these " +
+                      "variables were created with their own name as the example. Set a real one " +
+                      "in the Ditto web app, or re-run with `examples`.",
+                  }
+                : {}),
+              ...(unresolvedAll.size ? { unresolvedPlaceholders: [...unresolvedAll] } : {}),
+              ...(malformedAll.size
+                ? {
+                    malformedPlaceholders: [...malformedAll],
+                    malformedNote:
+                      "These {{...}} names contain characters a Ditto variable can't have " +
+                      "(only A-Z a-z 0-9 _). They were left as literal text — rename them to snake_case and re-run.",
+                  }
+                : {}),
+              results,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
+  },
+);
+
+server.registerTool(
+  "merge_duplicate_items",
+  {
+    title: "Merge items whose copy is now identical (unofficial)",
+    description:
+      "Collapse base items that hold the SAME text into one item carrying all their Figma instances, then " +
+      "delete the leftovers. This is the cleanup variablisation creates: figma_link_pass dedupes by exact " +
+      "text, so four different merchant names become four items — and once you rewrite them all to " +
+      "{{merchant_name}} they are four copies of one string with numbered dev IDs (merchant-1..4) that no " +
+      "developer wants. One string should be one item with four instances. " +
+      "Call with apply=false (default) to see the groups and the dev ID each would collapse to; apply=true " +
+      "performs it. NOTE the ordering, which is not optional: a Figma node cannot move while its old item " +
+      "still owns it, so in practice the duplicates are ALWAYS deleted before their instances are " +
+      "re-attached to the keeper (observed 24 Aug 2026 — the move-first attempt is made but the backend " +
+      "rejects it every time). There is therefore a window where the items are gone and the instances are " +
+      "not yet re-attached: the captured instance payloads are echoed under `recoverInstances` on any group " +
+      "that does not verify, and that is the only way back. Deletion is irreversible. " +
+      "UNOFFICIAL: needs a session token (login_to_ditto) for the instance move.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID"),
+      apply: z
+        .boolean()
+        .optional()
+        .describe("false (default) = report the groups only; true = merge and delete the duplicates"),
+      groups: z
+        .array(
+          z.object({
+            keep: z.string().min(1).describe("Developer ID of the item to keep"),
+            merge: z.array(z.string().min(1)).min(1).describe("Developer IDs to fold into the keeper"),
+            renameTo: z
+              .string()
+              .optional()
+              .describe("Optional new dev ID for the keeper — use the suffix-free name, e.g. 'txn-merchant'"),
+          }),
+        )
+        .optional()
+        .describe(
+          "Explicit groups. Omit to auto-detect every set of base items sharing identical text. " +
+            "Give this when identical text should NOT be merged (genuinely separate strings that happen to match).",
+        ),
+      renameKeepers: z
+        .boolean()
+        .optional()
+        .describe(
+          "When auto-detecting, also strip a trailing -N from the keeper's dev ID if that frees up a " +
+            "cleaner name (merchant-1 -> merchant). Default true. Ignored for explicit groups, which use renameTo.",
+        ),
+    },
+  },
+  async ({ projectId, apply = false, groups, renameKeepers = true }) => {
+    const mongoProjectId = await projectMongoIdByDevId(projectId);
+    const dump = await fetchWorkspaceDump();
+    const items = dump.filter((i) => i.doc_ID === mongoProjectId && i.developerId);
+    const byDevId = new Map(items.map((i) => [i.developerId, i]));
+    const instancesOf = (it) => it?.integrations?.figmaV2?.instances || [];
+
+    // Auto-detect: group by exact text, keep the item with the most instances
+    // (ties broken by shortest dev ID, which is usually the least suffixed).
+    let plan = groups;
+    if (!plan) {
+      const byText = new Map();
+      for (const it of items) {
+        const t = it.text ?? "";
+        if (!t.trim()) continue;
+        if (!byText.has(t)) byText.set(t, []);
+        byText.get(t).push(it);
+      }
+      plan = [];
+      for (const [text, group] of byText) {
+        if (group.length < 2) continue;
+        const sorted = [...group].sort(
+          (a, b) =>
+            instancesOf(b).length - instancesOf(a).length ||
+            a.developerId.length - b.developerId.length ||
+            a.developerId.localeCompare(b.developerId),
+        );
+        const keeper = sorted[0];
+        const stripped = keeper.developerId.replace(/-\d+$/, "");
+        const renameTo =
+          renameKeepers && stripped !== keeper.developerId && !byDevId.has(stripped)
+            ? stripped
+            : undefined;
+        plan.push({
+          keep: keeper.developerId,
+          merge: sorted.slice(1).map((i) => i.developerId),
+          ...(renameTo ? { renameTo } : {}),
+          text,
+        });
+      }
+    }
+
+    const report = [];
+    for (const g of plan) {
+      const keeper = byDevId.get(g.keep);
+      const sources = g.merge.map((d) => byDevId.get(d)).filter(Boolean);
+      const missing = g.merge.filter((d) => !byDevId.get(d));
+      const moving = sources.flatMap((src) =>
+        instancesOf(src).map((x) => ({
+          _id: newObjectId(),
+          figmaNodeId: x.figmaNodeId,
+          figmaPageId: x.figmaPageId,
+          figmaTopLevelFrameId: x.figmaTopLevelFrameId,
+          // Keep what the Figma layer actually says — the node still reads
+          // "Carrefour" even though the item now reads {{merchant_name}}.
+          lastReconciledRichText: x.lastReconciledRichText,
+          appliedVariantId: null,
+          position: x.position,
+        })),
+      );
+      const entry = {
+        keep: g.keep,
+        merge: g.merge,
+        ...(g.renameTo ? { renameTo: g.renameTo } : {}),
+        text: g.text ?? keeper?.text,
+        instancesBefore: instancesOf(keeper).length,
+        instancesMoving: moving.length,
+        ...(missing.length ? { unknownIds: missing } : {}),
+      };
+
+      if (!keeper) {
+        entry.status = "skipped";
+        entry.reason = "keeper dev ID not found in this project";
+        report.push(entry);
+        continue;
+      }
+      if (!apply) {
+        entry.status = "planned";
+        report.push(entry);
+        continue;
+      }
+
+      const target = instancesOf(keeper).length + moving.length;
+      const persisted = async () => {
+        const fresh = await fetchWorkspaceDump();
+        return instancesOf(fresh.find((i) => i._id === keeper._id));
+      };
+      try {
+        if (moving.length) {
+          await connectTextItems(mongoProjectId, { [keeper._id]: moving });
+        }
+        let now = moving.length ? (await persisted()).length : instancesOf(keeper).length;
+        if (moving.length && now < target) {
+          // The old item still owns those Figma nodes — drop it, then retry.
+          await deleteTextItems(projectId, g.merge);
+          entry.deletedBeforeMove = true;
+          await connectTextItems(mongoProjectId, { [keeper._id]: moving });
+          now = (await persisted()).length;
+        } else if (g.merge.length) {
+          await deleteTextItems(projectId, g.merge);
+        }
+        entry.instancesAfter = now;
+        entry.verified = now >= target;
+        if (g.renameTo) {
+          await renameDevId(mongoProjectId, keeper._id, g.renameTo);
+          entry.renamed = true;
+        }
+        entry.status = entry.verified ? "merged" : "incomplete";
+        if (!entry.verified) entry.recoverInstances = moving;
+      } catch (err) {
+        entry.status = "failed";
+        entry.reason = err.message;
+        entry.recoverInstances = moving;
+      }
+      report.push(entry);
+    }
+
+    const counts = report.reduce((a, r) => ((a[r.status] = (a[r.status] || 0) + 1), a), {});
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              projectId,
+              apply,
+              counts,
+              itemsRemoved: apply
+                ? report.filter((r) => r.status === "merged").reduce((a, r) => a + r.merge.length, 0)
+                : 0,
+              ...(apply
+                ? {}
+                : {
+                    note:
+                      "Nothing was changed. Re-run with apply=true to merge, or pass `groups` to control " +
+                      "which sets collapse and what the keeper is renamed to.",
+                  }),
+              groups: report,
+            },
+            null,
+            2,
+          ),
         },
       ],
     };

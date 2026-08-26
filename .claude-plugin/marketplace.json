@@ -7,7 +7,7 @@
       "name": "ditto-workflows",
       "source": "./plugin",
       "description": "MCP tools for Ditto (projects, translate, review, variablise, Figma link-pass, components, search) bundled with the /ditto-handoff, /ditto-translate and /ditto-review skills. Installs the server via npx; add your Ditto API key in the plugin's Configure screen afterwards.",
-      "version": "0.17.1",
+      "version": "0.18.0",
       "license": "MIT",
       "keywords": ["ditto", "dittowords", "localization", "translation"]
     }

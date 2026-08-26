@@ -1,8 +1,8 @@
 # ditto-workflows-mcp
 
-An MCP server for [Ditto](https://dittowords.com) — drive copy workflows from Claude: find and write glossary-aware translations (Claude translates — no DeepL), review them with a human translator, build a workspace translation memory, hand a Figma frame off into Ditto end-to-end, variablise hardcoded values, and manage workflow statuses.
+An MCP server for [Ditto](https://dittowords.com) — drive copy workflows from Claude: find and write glossary-aware translations (Claude translates — no DeepL), review them with a human translator, build a workspace translation memory, hand a Figma frame off into Ditto end-to-end, variablise hardcoded values *and genuinely link them to workspace variables*, and manage workflow statuses.
 
-Works with any Ditto workspace — auth is your own workspace API key. A few extra tools (Figma link-pass, dev-ID rename) use your browser session for operations the public API doesn't expose.
+Works with any Ditto workspace — auth is your own workspace API key. A few extra tools (Figma link-pass, dev-ID rename, variable linking) use your browser session for operations the public API doesn't expose.
 
 ## Tools
 
@@ -18,7 +18,7 @@ Works with any Ditto workspace — auth is your own workspace API key. A few ext
 | `apply_review_sheet(projectId, variantId?, path?)` | Parse the translator's edited sheet back into Ditto: edits written at FINAL, approvals promoted to FINAL, flagged/blank left in REVIEW |
 | `update_status(projectId, status, ids?/fromStatus?, variantId?)` | Set status on base items or a variant; unknown IDs skipped |
 | `update_text(projectId, updates[], status?)` | Rewrite base item text (copy edits, `{{variable}}` replacements); unknown IDs skipped |
-| `list_variablisation_candidates(projectId)` | Base items with hardcoded dynamic values (dates, amounts, %, card last-4, emails) + the workspace's variables — Claude suggests `{{variable}}` replacements, applied via `update_text` |
+| `list_variablisation_candidates(projectId)` | Base items with hardcoded dynamic values (dates, amounts, %, card last-4, emails) + the workspace's variables — Claude suggests `{{variable}}` replacements, applied via `link_variables` (use `update_text` only if you deliberately want literal placeholder text). Regex-based, so it misses semantic cases — date *ranges*, reference IDs, hardcoded names — read the item list yourself too, and check item text against existing variables' example values |
 | `list_components(folderId?)` | The workspace's component library (shared strings) — check before writing new copy |
 | `search_text(query, projectId?, limit=50)` | Substring search over base items + components — find existing copy to reuse, or locate where a string lives |
 | `refresh_translation_assets(variantId?)` | Build the translation memory from FINAL (expert-approved) translations workspace-wide — one clean table of source→translation to reuse before translating; sources with conflicting FINAL translations are held out into a separate `translation-conflicts.md` (with dev IDs + projects) to resolve. Skips configured test/sandbox projects and `[XX-TODO]` placeholders |
@@ -34,6 +34,8 @@ Some operations the public API can't do are covered by replaying the Ditto web a
 | `set_session_token(token)` | Manual alternative: paste the `Authorization` header from devtools (or set `DITTO_JWT` in the env). Validated immediately; expiry reported |
 | `rename_developer_id(projectId, renames[])` | Rename developer IDs (`{from, to}` pairs) — not possible via the public API. Skips unknown/colliding IDs with reasons and verifies results via the public API afterwards |
 | `figma_link_pass(projectId, figmaUrl)` | Wire a Figma frame's copy into a project: existing texts get connected, new ones created as WIP, matches to library components linked. Needs a "Copy link to selection" URL and `FIGMA_API_KEY` (personal access token, file-content read scope) |
+| `merge_duplicate_items(projectId, apply?, groups?)` | Collapse base items holding the SAME text into one item carrying all their Figma instances, then delete the leftovers — the cleanup variablisation creates (four merchant names become four items, then all become `{{merchant_name}}` with dev IDs `-1..-4`). Defaults to `apply: false`, reporting the plan and changing nothing. **Judge every group: identical text is not identical meaning** — generically-named variables make distinct concepts look mergeable. Deletion is irreversible, and because a Figma node cannot move while its old item owns it, the duplicates are always deleted *before* their instances land on the keeper; unverified groups echo `recoverInstances` |
+| `link_variables(projectId, updates[], createMissing?)` | Rewrite items to `{{variable}}` placeholders **and actually link them** — the thing `update_text` can't do. Missing variables are created first (public API) unless `createMissing: false`. Reports `unresolvedPlaceholders` (no such variable) and `malformedPlaceholders` (names with hyphens/dots, which Ditto can't accept) instead of silently leaving literal text, and verifies each item's `variableIds` via the public API afterwards |
 
 Wherever `variantId` is omitted, the default variant applies (config file, or `DITTO_DEFAULT_VARIANT` in `.env`).
 
@@ -148,5 +150,5 @@ Restart your client, run `/mcp` — `ditto-workflows` should show connected. The
 ## Notes
 
 - Every GET carries a cache-buster: Ditto's CDN caches responses by exact URL and ignores `no-cache` headers, serving stale data after writes.
-- `{{variable}}` placeholders written via the API land as literal text — the public API can't link workspace variables to items (verified: `variableIds` in a PATCH is silently ignored). Linking and variable *creation* still happen in the Ditto web app; the copy shape is set here.
-- The unofficial backend tools (`login_to_ditto`, `figma_link_pass`, `rename_developer_id`) replay Ditto's internal web-app API — unversioned and subject to change. They live in a separate module (`ditto-backend.js`) so a breakage there never affects the public-API tools.
+- **Variable linking needs the rich-text path, not a field.** A linked variable is a *node inside* the item's `rich_text` — `{"type":"variable","attrs":{name,text,variableId,variableType}}` — and the public API's `variableIds` is *derived* from those nodes. So `PATCH /v2/textItems` ignores both `variableIds` and `variables` (verified 24 Aug 2026, both field names). `update_text` therefore writes placeholders as literal text; use **`link_variables`**, which builds the node via the backend and verifies the result. Variable *creation* does work on the public API, and `link_variables` does it for you — any placeholder with no matching workspace variable is created first (unless `createMissing: false`), with its example value recovered from the copy it replaced. There is no standalone create/delete-variable tool; `deleteVariables()` exists in `ditto-api.js` if you need the reverse.
+- The unofficial backend tools (`login_to_ditto`, `figma_link_pass`, `rename_developer_id`, `link_variables`) replay Ditto's internal web-app API — unversioned and subject to change. They live in a separate module (`ditto-backend.js`) so a breakage there never affects the public-API tools.

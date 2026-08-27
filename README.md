@@ -54,29 +54,46 @@ Three Claude Code skills ship in `plugin/skills/`, encoding the standard playboo
 
 They load automatically with the plugin install below. With a standalone MCP install, copy the folders from `plugin/skills/` into `~/.claude/skills/` to have them everywhere.
 
-## Components are read-only, by design
+## Components: linked automatically, never edited
 
 Library components are the design system's shared strings. They belong to one
-person — the design-system designer / content writer — and are changed only by
-them, in the Ditto web app. **This server has no component write path at all.**
+person — the design-system designer / content writer. The line this server draws
+is between **applying** the design system and **changing** it:
 
-- It cannot create, rename, re-text, re-link, delete or translate a component.
-  There is no such function in `ditto-backend.js`, deliberately, and a
-  regression test in `npm test` fails if one reappears.
-- It refuses to write to any project item **governed by** a component — base
-  text, variablisation, translations, status changes, dev-ID renames, merging.
-  Such items come back as `componentLinkedSkipped` with the reason. Ask the
-  component's owner to make the change once, on the component.
-- Work lists (`list_untranslated`, `list_for_review`,
-  `list_variablisation_candidates`) leave those items out, so they are never
-  proposed in the first place.
-- **Reads stay open and are encouraged:** `list_components` and `search_text`
-  cover the library, because knowing a component exists is how you avoid
-  duplicating copy that already ships.
-- `figma_link_pass` reports `componentMatches` read-only — where a screen's copy
-  duplicates a component — and links nothing. Until 0.21.0 it silently
-  `PATCH`ed `/library-component/{id}/link` on every run, editing the design
-  system as a side effect of a handoff.
+**Allowed — linking.** `figma_link_pass` links a screen's texts to the matching
+library component automatically. Linking points the item *at* the component; the
+component's copy, translations and statuses are untouched. This is the only
+component write in the codebase (`PATCH /library-component/{id}/link`), and a
+regression test in `npm test` fails if any other appears.
+
+**Forbidden — editing a component's content, in every case.** Once an item is
+linked it is component-governed, and this server refuses to write it:
+
+| Attempted on a component-governed item | Result |
+|---|---|
+| Base text edit (`update_text`) | refused |
+| Variablisation (`link_variables`) | refused |
+| Translation (`write_translations`) | refused |
+| Status change (`update_status`) | refused |
+| Developer-ID rename (`rename_developer_id`) | refused |
+| Merge / delete (`merge_duplicate_items`) | excluded |
+| Review-sheet edit or approval (`apply_review_sheet`) | refused |
+
+This holds **whatever the state of the translation** — not just when it is FINAL,
+but when it is *missing* too. A gap in a component's translations is the owner's
+to fill; filling it here would push unreviewed copy into every project that uses
+that component. Refusals come back as `componentLinkedSkipped` with the reason,
+so nothing fails silently.
+
+Work lists (`list_untranslated`, `list_for_review`,
+`list_variablisation_candidates`) leave those items out entirely, so they are
+never offered as pending work in the first place. Reads stay fully open —
+`list_components` and `search_text` cover the library, because knowing a
+component exists is how you avoid duplicating copy that already ships.
+
+Because linking is what turns an item into a protected one, **linking is a
+one-way door into protection** — that is intended. Expect a handoff to link some
+items and then deliberately skip them for the rest of the run.
 
 Detection uses the backend's item→component link (`ws_comp`), which needs a
 session token. **The public API does not expose component linkage at all**, so

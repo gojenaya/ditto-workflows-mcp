@@ -5,6 +5,29 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-08-27
+
+Corrects 0.21.0, which drew the line in the wrong place. Auto-linking to
+components is wanted — it is how the design system gets applied. What must never
+happen is editing a component's content.
+
+### Changed
+
+- **Auto-linking to library components is restored.** `figma_link_pass` links matching texts to their component again. Linking points the item *at* the component and leaves the component's copy, translations and statuses untouched, so it applies the design system rather than changing it. 0.21.0 removed this along with the genuinely unsafe behaviour; the removal meant a screen's "Confirm" would sit unlinked beside the component that already owned that string, accumulating duplicate copy.
+- **`linkComponent()` is back as the *only* permitted component write** (`PATCH /library-component/{id}/link`), documented as such in `ditto-backend.js`. The regression test no longer forbids all component writes — it now asserts that the only one present is `/link`, and fails on any other (create, rename, re-text, delete, or writing translations).
+- **`figma_link_pass` reports a `componentText` field when the item's wording differed from the component's.** Matching is on normalised text, so an item reading `confirm` links to a `Confirm` component and then defers to its exact wording. That is the design system applying, but it is now visible rather than silent.
+
+### Kept from 0.21.0 — every content guard
+
+Linking makes an item component-governed, and that protection is unchanged: `update_text`, `link_variables`, `write_translations`, `update_status`, `rename_developer_id`, `merge_duplicate_items` and `apply_review_sheet` all refuse such items and report `componentLinkedSkipped`. `list_untranslated`, `list_for_review` and `list_variablisation_candidates` still exclude them so they are never offered as work.
+
+**This holds when a translation is FINAL and equally when it is MISSING.** Verified against production: `split-pay` in `help-center` is component-linked with no Arabic translation — `list_untranslated` does not offer it, and a direct `write_translations` call returns `wrote: 0` with the reason. An absent translation is the component owner's to fill; filling it here would push unreviewed copy into every project using that component.
+
+### Notes
+
+- **Linking is a one-way door into protection**, by design: a handoff will now link some items and then deliberately skip them for renaming, variablisation, translation and status changes. Those skips are correct behaviour, and all three skills say so explicitly, so a future run does not read them as failures to work around.
+- Reads remain fully open (`list_components`, `search_text`) — knowing a component exists is how you avoid duplicating it.
+
 ## [0.21.0] - 2026-08-27
 
 Library components are the design system's shared strings, owned by one person

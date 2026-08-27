@@ -81,20 +81,32 @@ console.log('\n--- COMPONENT PROTECTION ---');
 const backendSrc = fs.readFileSync(path.join(__dirname, '..', 'ditto-backend.js'), 'utf8');
 const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'mcp-server.js'), 'utf8');
 
-// 1. No write of any kind to a library-component endpoint. Scan actual
-// backendFetch calls, not raw text — the file legitimately *mentions*
-// "PATCH /library-component/..." in the comment explaining the removal.
+// 1. Linking is the ONLY permitted component write. Any other write to a
+// library-component endpoint — re-texting it, writing its translations,
+// creating or deleting one — is forbidden. Scan actual backendFetch calls, not
+// raw text, so explanatory comments don't trip it.
 const stripComments = (src) => src.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 const compWrites = [...stripComments(backendSrc).matchAll(/backendFetch\(\s*`([^`]*library-component[^`]*)`\s*,\s*\{([^}]*)\}/g)]
   .filter(m => /method:\s*"(POST|PATCH|PUT|DELETE)"/.test(m[2]));
-if (compWrites.length) { console.log('  ❌ component write path in ditto-backend.js:', compWrites.map(m=>m[1])); f++; }
-else console.log('  ✅ ditto-backend.js has no library-component write path');
+const illegal = compWrites.filter(m => !/\/link$/.test(m[1].replace(/\$\{[^}]*\}/g, 'X')));
+if (illegal.length) { console.log('  ❌ non-link component write path:', illegal.map(m=>m[1])); f++; }
+else console.log(`  ✅ only permitted component write present (${compWrites.length} = /link)`);
 
-// 2. linkComponent must stay gone — it ran on every handoff and edited the DS.
-if (/export\s+async\s+function\s+linkComponent/.test(backendSrc)) { console.log('  ❌ linkComponent() is back in ditto-backend.js'); f++; }
-else console.log('  ✅ linkComponent() is absent');
-if (/\blinkComponent\s*\(/.test(serverSrc)) { console.log('  ❌ mcp-server.js still calls linkComponent()'); f++; }
-else console.log('  ✅ mcp-server.js never calls linkComponent()');
+// 2. Linking must actually still work — the user wants auto-linking.
+if (!/export\s+async\s+function\s+linkComponent/.test(backendSrc)) { console.log('  ❌ linkComponent() missing — auto-linking is wanted'); f++; }
+else console.log('  ✅ linkComponent() present (linking applies the DS, does not change it)');
+if (!/\blinkComponent\s*\(/.test(serverSrc)) { console.log('  ❌ figma_link_pass no longer links to components'); f++; }
+else console.log('  ✅ figma_link_pass links matching items to components');
+
+// 2b. A component's translations must never be written — not when FINAL, and
+// not when MISSING either. write_translations must consult the guard.
+{
+  const start = serverSrc.indexOf('  "write_translations",');
+  const next = serverSrc.indexOf('server.registerTool', start);
+  const body = serverSrc.slice(start, next);
+  if (!/componentProtectedIdsWorkspace/.test(body)) { console.log('  ❌ write_translations can write component translations'); f++; }
+  else console.log('  ✅ write_translations refuses component-governed items (FINAL or missing alike)');
+}
 
 // 3. Every tool that writes items must consult the guard.
 for (const tool of ['write_translations','update_text','update_status','link_variables','rename_developer_id','merge_duplicate_items','apply_review_sheet']) {

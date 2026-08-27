@@ -22,7 +22,7 @@ import { getDefaultVariant, readConfigDefaultVariant, setDefaultVariant, getExcl
 import {
   setSessionToken, getSessionToken, tokenExpiry, validateToken,
   fetchWorkspaceDump, renameDevId, projectMongoIdByDevId,
-  createTextItem, connectTextItems, fetchLibraryComponents,
+  createTextItem, connectTextItems, fetchLibraryComponents, linkComponent,
   newObjectId, toRichText, TOKEN_HELP,
   listStyleGuides, listStyleGuideRules, addStyleGuideRules,
   fetchVariables,
@@ -616,7 +616,7 @@ function mdTable(headers, rows, wrapCols = [], maxWidth = MD_WRAP) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.21.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.22.0" });
 
 server.registerTool(
   "list_projects",
@@ -1912,14 +1912,14 @@ server.registerTool(
       }
     }
 
-    // 6. Components: REPORT ONLY — never link, never write.
-    //    This step used to PATCH /library-component/{id}/link on every run,
-    //    silently editing the design system's shared strings as a side effect of
-    //    a handoff. Components are owned by one person (the design-system
-    //    designer / content writer) and changed only by them in the Ditto web
-    //    app, so the link is now theirs to make. We just point out the overlap,
-    //    which is the genuinely useful half: it tells you this screen is
-    //    duplicating copy a component already owns.
+    // 6. Components: LINK matching items to their library component.
+    //    Linking APPLIES the design system — it points the item at the component
+    //    and changes nothing about the component itself (copy, translations and
+    //    statuses are untouched). It is the one component write this server is
+    //    allowed to make. Editing a component's content, including filling in a
+    //    missing translation, stays forbidden and is enforced separately: once
+    //    ws_comp is set, every write tool refuses the item. So linking is a
+    //    one-way door into protection, deliberately.
     const componentMatches = [];
     try {
       const compIndex = new Map();
@@ -1927,19 +1927,43 @@ server.registerTool(
         const key = normalizeText(c.text);
         if (key && !compIndex.has(key)) compIndex.set(key, c);
       }
+      const linkByComp = new Map();
       for (const { item } of [...toLink, ...created]) {
         const hit = compIndex.get(normalizeText(item.text));
         if (!hit || !item._id) continue;
         const already = Array.isArray(hit.instances) && hit.instances.includes(item._id);
+        const compName = hit.developerId || hit.name;
+        // Matching is on normalised text, so an item reading "confirm" can link
+        // to a "Confirm" component. The item then adopts the component's exact
+        // wording — that is the design system applying, not copy being lost, but
+        // report it so a case/spacing change is never a surprise.
+        const differs = (item.text || "").trim() !== (hit.text || "").trim();
         componentMatches.push({
           item: item.developerId || item._id,
           text: item.text,
-          component: hit.developerId || hit.name,
+          component: compName,
+          ...(differs ? { componentText: hit.text } : {}),
           alreadyLinked: already,
         });
+        if (already) continue;
+        if (!linkByComp.has(hit._id)) linkByComp.set(hit._id, { component: hit, itemIds: [] });
+        linkByComp.get(hit._id).itemIds.push(item._id);
+      }
+      for (const [compId, { component, itemIds }] of linkByComp) {
+        const compName = component.developerId || component.name;
+        try {
+          await linkComponent(compId, mongoProjectId, itemIds);
+          for (const m of componentMatches) {
+            if (m.component === compName && !m.alreadyLinked) m.linked = true;
+          }
+        } catch (err) {
+          for (const m of componentMatches) {
+            if (m.component === compName && !m.alreadyLinked) m.linkError = err.message;
+          }
+        }
       }
     } catch (err) {
-      componentMatches.push({ error: `component match pass skipped: ${err.message}` });
+      componentMatches.push({ error: `component pass skipped: ${err.message}` });
     }
 
     // 7. Re-fetch for the auto-assigned dev IDs of created items, and map each
@@ -2031,10 +2055,13 @@ server.registerTool(
                 ? {
                     componentMatches,
                     componentMatchesNote:
-                      "Read-only. These texts also exist as library components; this server does NOT link or " +
-                      "modify components — that is the design-system owner's call, made in the Ditto web app. " +
-                      "Items with alreadyLinked: true are governed by their component, so their copy and " +
-                      "translations must be changed on the component, not here.",
+                      "These texts also exist as library components and have been LINKED to them — that " +
+                      "applies the design system and leaves the component itself untouched. Linked items are " +
+                      "now component-governed, so the rest of this handoff will skip them: their copy, " +
+                      "variables, translations, status and developer ID belong to the component and are " +
+                      "changed only by its owner, in the Ditto web app. Do not treat those skips as failures, " +
+                      "and do not fill in a component's missing translation here. A `componentText` field " +
+                      "means the item's wording differed and now defers to the component's.",
                   }
                 : {}),
             },

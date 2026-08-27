@@ -280,18 +280,30 @@ export async function fetchLibraryComponents() {
   return all;
 }
 
-// DELIBERATELY REMOVED: linkComponent() (PATCH /library-component/{id}/link).
+// ─── THE ONLY PERMITTED COMPONENT WRITE: linking ─────────────────────────────
 //
 // Library components are the design system's shared strings, owned by one person
-// (the design-system designer / content writer) and edited only by them in the
-// Ditto web app. This server had been linking items to components automatically
-// during figma_link_pass, which modified the design system as a side effect of a
-// handoff — done by whoever happened to run it, without review.
+// (the design-system designer / content writer). Exactly one operation here is
+// allowed, and this is it: pointing a project item AT a component. That applies
+// the design system rather than changing it — the component's copy, its
+// translations and its statuses are untouched; only the item now defers to them.
 //
-// There is now NO component write path in this module, by design. Do not add one:
-// creating, renaming, re-linking, re-texting or translating a component all
-// belong to its owner. fetchLibraryComponents() above is read-only and stays,
-// because knowing a component exists is how you avoid duplicating it.
+// Everything else about a component remains off limits and has no function in
+// this module: no create, no rename, no re-text, no delete, and above all no
+// writing its translations — not when a translation is FINAL, and not when one
+// is MISSING either. A gap in a component's translations is the owner's to fill;
+// filling it here would put unreviewed copy into every project that uses it.
+//
+// The matching guard for the other half lives in mcp-server.js: once an item is
+// linked (`ws_comp` set), every write tool refuses to touch its text, variants,
+// status or developer ID. Linking is therefore a one-way door into protection,
+// which is the intended behaviour — see componentProtectedIds().
+export async function linkComponent(componentMongoId, projectMongoId, textItemIds) {
+  return backendFetch(`/library-component/${componentMongoId}/link`, {
+    method: "PATCH",
+    body: JSON.stringify({ projectId: projectMongoId, textItemIds, wasSuggested: false }),
+  });
+}
 
 // ─── Style-guide endpoints (rules read/write) ─────────────────────────────────
 //

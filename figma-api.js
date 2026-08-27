@@ -57,11 +57,23 @@ export function normalizeText(t) {
   return (t || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+// Longest pure-digit run still treated as mock junk rather than copy. Stray
+// single/double digits in a mock ("4", "12" — list indices, step counters,
+// badge numbers) are noise; anything longer is real dynamic content.
+const MAX_PLACEHOLDER_DIGITS = 2;
+
 export function isPlaceholder(text) {
   if (!text?.trim()) return true;
   const t = normalizeText(text);
   if (t.length <= 1) return true;
-  if (/^\d+$/.test(t)) return true;
+  // Pure-digit texts USED to be discarded wholesale, which silently dropped
+  // every bare numeric value in a design — order numbers, reference IDs,
+  // account numbers, OTP codes — before they ever reached Ditto. Those are
+  // exactly the strings that most need a variable, so they were invisible not
+  // just to variablisation but to the whole handoff: no item, no linkage, no
+  // translation. Only short runs are junk now. (Found 27 Aug 2026: a real
+  // "Order no." row whose value "648476283017361" never became an item.)
+  if (/^\d+$/.test(t) && t.length <= MAX_PLACEHOLDER_DIGITS) return true;
   return FIGMA_PLACEHOLDERS.has(t);
 }
 

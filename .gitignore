@@ -8,5 +8,9 @@ node_modules/
 
 # Local-only — workspace-specific, never publish
 translation-assets/
-test/
 .claude/
+
+# The smoke test talks to the real workspace, so it stays local. The detector
+# regression suite is pure (no network, no credentials) and IS tracked.
+test/*
+!test/variablise-detection-test.mjs

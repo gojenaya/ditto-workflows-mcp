@@ -177,10 +177,25 @@ const DYNAMIC_PATTERNS = [
   // Card last-4 in parentheses — "Debit card (4563)", "(8122)".
   { pattern: /\(\s*\d{4}\s*\)/, type: "card_last4" },
   // Reference/transaction IDs — "#000002798236526", "Ref: 8829104".
-  { pattern: /#\s*\d{6,}/, type: "reference_id" },
-  { pattern: /\b(ref|txn|transaction|order|invoice)[\s.:#-]*\d{5,}\b/i, type: "reference_id" },
+  { pattern: /#\s*\d{4,}/, type: "reference_id" },
+  // A field keyword followed by ANY value — digits, or an alphanumeric code.
+  // The old form demanded 5+ digits glued to the keyword, so "Order #1234",
+  // "Order no. 4521" and "Booking ref: XY9K2M" all slipped through.
+  {
+    pattern:
+      /\b(ref|reference|txn|transaction|order|invoice|receipt|tracking|ticket|booking|policy|case|loan|account|iban|voucher|promo|coupon)\b[\s.:#-]*(no\.?|num(ber)?|id|code)?[\s.:#-]*((?=[A-Za-z0-9-]*\d)[A-Za-z0-9][A-Za-z0-9-]{2,}|\d{3,})\b/i,
+    type: "reference_id",
+  },
   // Bare long digit runs (IDs, account/wallet numbers) that aren't years.
   { pattern: /\b\d{7,}\b/, type: "reference_id" },
+  // Alphanumeric ID codes — "ICL2602230000001234", "ORD-2026-0012", "TRK88291".
+  // Every other pattern here is digit-anchored, so a letter prefix made these
+  // structurally invisible: \b\d{7,}\b cannot fire mid-token because there is
+  // no word boundary between "L" and "2". Requires a 3+ digit run or a
+  // separator, which keeps ordinary words-with-numbers ("iPhone15") out.
+  { pattern: /\b(?=[A-Za-z-]*\d)(?=\d*[A-Za-z])[A-Za-z0-9]*(?:\d{3,}|[A-Za-z0-9]+-[A-Za-z0-9-]*\d)[A-Za-z0-9-]*\b/, type: "reference_id" },
+  // Grouped alphanumerics — IBANs, masked accounts: "AE07 0331 2345 6789".
+  { pattern: /\b[A-Z]{2}\d{2}(\s?[A-Z0-9]{4}){3,}\b/, type: "reference_id" },
   // Country dial codes — "+63", "+971".
   { pattern: /(^|\s)\+\d{1,4}\b/, type: "dial_code" },
   { pattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/, type: "email" },
@@ -204,6 +219,118 @@ function detectDynamicTypes(text) {
     if (pattern.test(text)) types.add(type);
   }
   return [...types];
+}
+
+// ─── FIELD LABELS ────────────────────────────────────────────────────────────
+// The reason "Order no." never gets variablised: in Figma the label and its
+// value are usually SEPARATE text layers. The label ("Order no.") is static and
+// correctly left alone; the value arrives as a bare token ("4521", "AB12CD34")
+// that looks like nothing in isolation. No amount of regex over one string can
+// fix that — the signal is the NEIGHBOURING label, not the text itself.
+//
+// So: recognise labels, then pair each with its nearest value layer using the
+// Figma positions the link-pass already stores. A label whose value sits in the
+// same layer ("Order no. 4521") is caught by DYNAMIC_PATTERNS instead.
+const FIELD_NOUNS =
+  "order|ref|reference|txn|transaction|invoice|receipt|tracking|ticket|booking|policy|case|loan|account|iban|card|customer|merchant|beneficiary|voucher|promo|coupon|batch|serial|licence|license|permit|registration";
+
+// "Order no.", "Loan ID", "Reference number", "Tracking ID:", "IBAN".
+const FIELD_LABEL = new RegExp(
+  `^\\s*(${FIELD_NOUNS})?[\\s.:#-]*\\b(no\\.?|num(ber)?|id|ref\\.?|reference|code)\\s*:?\\s*$|^\\s*(iban|ifsc|swift|bic)\\s*:?\\s*$`,
+  "i",
+);
+
+function isFieldLabel(text) {
+  const t = (text || "").trim();
+  // A label is short and carries no value of its own.
+  if (!t || t.length > 40) return false;
+  if (detectDynamicTypes(t).length) return false;
+  return FIELD_LABEL.test(t);
+}
+
+// A value layer worth pairing with a label: short, no sentence punctuation, and
+// not obviously prose. Deliberately permissive — the model makes the final call,
+// this only decides what to put in front of it.
+function looksLikeFieldValue(text) {
+  const t = (text || "").trim();
+  if (!t || t.length > 60) return false;
+  if (isFieldLabel(t)) return false;
+  if (/[.!?]\s/.test(t)) return false;
+  return t.split(/\s+/).length <= 6;
+}
+
+// Pair each field label with the nearest plausible value layer in the same
+// Figma frame. Rect geometry comes from integrations.figmaV2.instances, so this
+// only works for items the link-pass connected; unlinked items simply don't
+// appear. Layout convention is label-left / value-right, or label-above /
+// value-below, so both are searched and the nearest wins.
+function pairLabelsWithValues(itemsWithRects) {
+  const byFrame = new Map();
+  for (const entry of itemsWithRects) {
+    if (!byFrame.has(entry.frameId)) byFrame.set(entry.frameId, []);
+    byFrame.get(entry.frameId).push(entry);
+  }
+  const pairs = [];
+  const orphanLabels = [];
+  for (const group of byFrame.values()) {
+    // An item that has its own neighbour to the right on its own row is acting
+    // as a label in a label-left/value-right table, NOT as somebody else's
+    // value. Without this, "Order no." pairs with the "Transaction date" label
+    // on the row below it (observed on real data) instead of reporting that its
+    // own value is missing.
+    const actsAsLabel = new Set();
+    for (const e of group) {
+      const ey = e.rect.y + e.rect.height / 2;
+      const eh = e.rect.height || 16;
+      const hasValueRight = group.some(
+        (o) =>
+          o !== e &&
+          o.rect.x > e.rect.x + e.rect.width &&
+          Math.abs(o.rect.y + o.rect.height / 2 - ey) <= eh * 1.2,
+      );
+      if (hasValueRight) actsAsLabel.add(e);
+    }
+    const labels = group.filter((e) => isFieldLabel(e.text));
+    for (const label of labels) {
+      const lx = label.rect.x + label.rect.width / 2;
+      const ly = label.rect.y + label.rect.height / 2;
+      const h = label.rect.height || 16;
+      let best = null;
+      for (const cand of group) {
+        if (cand === label || cand.id === label.id) continue;
+        if (!looksLikeFieldValue(cand.text)) continue;
+        const cx = cand.rect.x + cand.rect.width / 2;
+        const cy = cand.rect.y + cand.rect.height / 2;
+        const sameRow =
+          Math.abs(cy - ly) <= h * 1.2 && cand.rect.x > label.rect.x + label.rect.width * 0.5;
+        const below =
+          Math.abs(cx - lx) <= Math.max(label.rect.width, cand.rect.width) &&
+          cy > ly &&
+          cy - ly <= h * 3 &&
+          !actsAsLabel.has(cand);
+        if (!sameRow && !below) continue;
+        const dist = Math.hypot(cx - lx, cy - ly);
+        if (!best || dist < best.dist) best = { cand, dist, how: sameRow ? "same-row" : "below" };
+      }
+      if (best) {
+        pairs.push({
+          id: best.cand.id,
+          text: best.cand.text,
+          label: label.text,
+          labelId: label.id,
+          relation: best.how,
+          screen: label.frameName,
+        });
+      } else {
+        // A field label with no value beside it means the value layer never
+        // became an item — usually because it was filtered out on the way in.
+        // Worth reporting loudly: it cannot be variablised because it does not
+        // exist, which no amount of pattern-matching would ever reveal.
+        orphanLabels.push({ labelId: label.id, label: label.text, screen: label.frameName });
+      }
+    }
+  }
+  return { pairs, orphanLabels };
 }
 
 // ─── TRANSLATION MEMORY ──────────────────────────────────────────────────────
@@ -370,7 +497,7 @@ function mdTable(headers, rows, wrapCols = [], maxWidth = MD_WRAP) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.18.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.19.0" });
 
 server.registerTool(
   "list_projects",
@@ -560,30 +687,117 @@ server.registerTool(
   {
     title: "List variablisation candidates",
     description:
-      "Find base text items in a project containing hardcoded dynamic values (dates, amounts, percentages, " +
-      "card last-4, emails) that should be {{variable}} placeholders, plus the workspace's existing variables. " +
-      "You suggest the replacements: prefer semantically specific names ({{installment_amount}}, not {{amount}}); " +
-      "reuse an existing variable only when it genuinely fits; keep static text exactly as-is. Present the " +
-      "suggestions for user approval, then apply via update_text. Placeholders are written as literal " +
-      "{{name}} text — variables the workspace lacks must be created in the Ditto web app to resolve.",
+      "Find base text items holding hardcoded dynamic values that should become {{variable}} placeholders. " +
+      "Four independent signals, because no one of them is sufficient: (1) `pattern` — regex over the text " +
+      "itself (dates, amounts, percentages, card last-4, emails, reference/ID codes including alphanumeric " +
+      "ones like ICL2602230000001234 or ORD-2026-0012); (2) `labelledValue` — the item sits next to a field " +
+      "label in Figma (\"Order no.\", \"Loan ID\") so it is a field VALUE whatever its shape, which is the only " +
+      "way a bare \"4521\" is knowable; (3) `matchesVariableExample` — the text equals an existing workspace " +
+      "variable's example value, a direct hint that variable applies; (4) `unjudged` — everything else, handed " +
+      "to you deliberately. " +
+      "**The signals are recall aids, not the answer. You must read `unjudged` too.** Regex cannot judge " +
+      "semantics: hardcoded personal or merchant names, counts written as words (\"20K users\"), placeholder " +
+      "junk (\"XX AED\"), standalone currency codes and sample IDs with no numeric giveaway are invisible to " +
+      "every pattern here and are yours to catch. Treating the flagged lists as complete is the known failure " +
+      "mode of this tool. " +
+      "Then: prefer semantically specific names ({{outstanding_amount}}, not {{amount}} — one generic name " +
+      "across four different amounts is a real defect and it makes merge_duplicate_items unsafe); reuse an " +
+      "existing variable only when it genuinely fits; keep static text exactly as-is. Apply with " +
+      "`link_variables` (which also creates missing variables and links them properly), NOT `update_text`.",
     inputSchema: {
       projectId: z.string().describe("Ditto project developer ID"),
+      includeUnjudged: z
+        .boolean()
+        .optional()
+        .describe(
+          "Return the items no signal fired on (default true) so you can do the semantic pass. " +
+            "Set false only on a large project where the full list is too long to read.",
+        ),
     },
   },
-  async ({ projectId }) => {
+  async ({ projectId, includeUnjudged = true }) => {
     const [base, variables] = await Promise.all([
       fetchBaseItems(projectId),
       dittoFetch("/variables"),
     ]);
-    const candidates = base
-      .filter(
-        (i) =>
-          i.text?.trim() &&
-          !i.text.includes("{{") &&
-          !isStatusBarTime(i.text) &&
-          detectDynamicTypes(i.text).length,
-      )
-      .map((i) => ({ id: i.id, text: i.text, types: detectDynamicTypes(i.text) }));
+
+    const eligible = base.filter(
+      (i) => i.text?.trim() && !i.text.includes("{{") && !isStatusBarTime(i.text),
+    );
+
+    // Signal 2 needs Figma geometry, which only the backend dump carries. It is
+    // the signal that catches split label/value layers, so it matters — but a
+    // missing session token must not fail the whole tool.
+    let labelPairs = [];
+    let orphanLabels = [];
+    let proximityNote;
+    try {
+      const mongoProjectId = await projectMongoIdByDevId(projectId);
+      const dump = await fetchWorkspaceDump();
+      const withRects = [];
+      for (const it of dump) {
+        if (it.doc_ID !== mongoProjectId || !it.developerId) continue;
+        for (const inst of it.integrations?.figmaV2?.instances || []) {
+          if (!inst.position) continue;
+          withRects.push({
+            id: it.developerId,
+            text: it.text ?? "",
+            rect: inst.position,
+            frameId: inst.figmaTopLevelFrameId,
+            frameName: inst.figmaTopLevelFrameId,
+          });
+        }
+      }
+      const paired = pairLabelsWithValues(withRects);
+      labelPairs = paired.pairs;
+      // One label can have several Figma instances; report it once.
+      const seenOrphan = new Set();
+      orphanLabels = paired.orphanLabels.filter((o) => {
+        if (seenOrphan.has(o.labelId)) return false;
+        seenOrphan.add(o.labelId);
+        // A label whose value exists elsewhere in the project is fine.
+        return !paired.pairs.some((pr) => pr.labelId === o.labelId);
+      });
+    } catch (err) {
+      proximityNote =
+        "Label-proximity detection was skipped (" +
+        err.message +
+        "). It needs a session token (login_to_ditto) and items the link-pass has connected. " +
+        "Without it, a field value in its own Figma layer — a bare '4521' under an 'Order no.' label — " +
+        "cannot be detected at all; scan for those yourself.";
+    }
+
+    const exampleToVar = new Map();
+    for (const v of variables) {
+      const ex = v.data?.example;
+      if (typeof ex === "string" && ex.trim()) exampleToVar.set(ex.trim(), v.id);
+    }
+    const labelById = new Map(labelPairs.map((p) => [p.id, p]));
+
+    const flagged = [];
+    const unjudged = [];
+    for (const i of eligible) {
+      const types = detectDynamicTypes(i.text);
+      const pair = labelById.get(i.id);
+      const varMatch = exampleToVar.get(i.text.trim());
+      const signals = [];
+      if (types.length) signals.push("pattern");
+      if (pair) signals.push("labelledValue");
+      if (varMatch) signals.push("matchesVariableExample");
+      if (!signals.length) {
+        unjudged.push({ id: i.id, text: i.text });
+        continue;
+      }
+      flagged.push({
+        id: i.id,
+        text: i.text,
+        signals,
+        ...(types.length ? { types } : {}),
+        ...(pair ? { fieldLabel: pair.label, labelRelation: pair.relation } : {}),
+        ...(varMatch ? { existingVariable: varMatch } : {}),
+      });
+    }
+
     return {
       content: [
         {
@@ -591,8 +805,35 @@ server.registerTool(
           text: JSON.stringify(
             {
               projectId,
-              count: candidates.length,
-              candidates,
+              counts: {
+                flagged: flagged.length,
+                byPattern: flagged.filter((f) => f.signals.includes("pattern")).length,
+                byFieldLabel: flagged.filter((f) => f.signals.includes("labelledValue")).length,
+                byVariableExample: flagged.filter((f) =>
+                  f.signals.includes("matchesVariableExample"),
+                ).length,
+                unjudged: unjudged.length,
+              },
+              readUnjudgedToo:
+                "The flagged list is a recall aid, not a verdict. Semantic cases — merchant and personal " +
+                "names, word-form counts, placeholder junk, standalone currency codes — appear only in " +
+                "`unjudged`. Read it before concluding the screen is variablised.",
+              ...(proximityNote ? { proximityNote } : {}),
+              ...(orphanLabels.length
+                ? {
+                    fieldLabelsWithNoValue: orphanLabels,
+                    fieldLabelsWithNoValueNote:
+                      "These Figma labels have no value item beside them, so the value layer never became " +
+                      "a Ditto item and CANNOT be variablised — it is absent, not unflagged. Usual cause: " +
+                      "the value was a bare number and got dropped by the link-pass placeholder filter " +
+                      "(fixed for runs after 27 Aug 2026 — re-run figma_link_pass to pull them in). " +
+                      "Otherwise the layer is outside the linked frame or already claimed by another item.",
+                  }
+                : {}),
+              flagged,
+              ...(includeUnjudged
+                ? { unjudged }
+                : { unjudgedOmitted: unjudged.length }),
               variables: variables.map((v) => ({
                 id: v.id,
                 type: v.type,

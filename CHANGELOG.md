@@ -5,6 +5,31 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-08-27
+
+Bare numeric values — order numbers, reference IDs, account numbers — were never
+reaching Ditto at all. Found while investigating why an "Order no." row wouldn't
+variablise.
+
+### Fixed
+
+- **The link-pass placeholder filter discarded every pure-digit text, so bare numeric values never became items.** `isPlaceholder()` returned true for `/^\d+$/`, intended to skip mock junk like a stray `4`. It also threw away order numbers, reference IDs, account numbers and OTP codes — exactly the strings that most need a variable. They were invisible to the *whole* handoff, not just variablisation: no item, no Figma linkage, no translation, and no detector could ever flag them because they did not exist. Confirmed on real data: an `Order no.` row whose Figma value `648476283017361` sat right beside the label had no Ditto item at all. Now only runs of ≤2 digits are treated as junk (`MAX_PLACEHOLDER_DIGITS`); `9:41` status-bar times and the named placeholder set are unaffected. **Re-run `figma_link_pass` on existing projects to pull in the values it previously dropped.**
+- **Alphanumeric ID codes were structurally undetectable.** Every dynamic pattern was digit-anchored, and `\b\d{7,}\b` cannot fire mid-token because there is no word boundary between `L` and `2` — so `ICL2602230000001234`, `ORD-2026-0012` and `TRK88291` all passed as static copy. Added an alphanumeric-code pattern requiring a 3+ digit run or a separator, which keeps ordinary words-with-numbers (`iPhone15`) out.
+- **The field-keyword pattern demanded 5+ digits glued to the keyword**, so `Order #1234`, `Order no. 4521` and `Booking ref: XY9K2M` all missed. It now accepts any digit-bearing value after a much wider keyword list (order, ref, txn, invoice, receipt, tracking, ticket, booking, policy, case, loan, account, iban, voucher, promo, coupon), and `#\s*\d{4,}` replaces the 6-digit form.
+- **The keyword pattern flagged ordinary copy as reference IDs.** Under `/i`, `[A-Z0-9]` also matches lowercase, so `Loan details` and `Transaction history` were reported as dynamic. The value branch now requires a digit.
+
+### Added
+
+- **`labelledValue` signal — detects a field value from its Figma neighbour, not its own text.** A bare `4521` is unknowable in isolation; what makes it dynamic is the `Order no.` label beside it. `list_variablisation_candidates` now pairs field labels with their nearest value layer using the geometry the link-pass already stores (`integrations.figmaV2.instances[].position`), handling both label-left/value-right and label-above/value-below. Needs a session token; degrades with an explicit `proximityNote` rather than failing.
+- **`fieldLabelsWithNoValue` — reports labels whose value layer never became an item.** This is what identifies the bug above from inside the tool: the value cannot be variablised because it is absent, not because it went unflagged. Would have diagnosed the `Order no.` case immediately.
+- **`matchesVariableExample` signal** — flags items whose text equals an existing workspace variable's example (`Carrefour` → `merchant_name`, `ICL2602230000001234` → `loan_id`). All six semantic misses in the 24 Aug production run had an exact-match variable already in the workspace.
+- **An `unjudged` list, returned by default.** The tool used to hand back only its own hits, which read as a complete answer and is why semantic cases kept slipping through. It now returns every item no signal fired on, and says in the output that reading it is required — regex cannot judge merchant names, word-form counts (`20K users`), placeholder junk (`XX AED`) or standalone currency codes. Pass `includeUnjudged: false` on very large projects.
+- **`test/variablise-detection-test.mjs`** — a regression suite over the detector, the label logic, the label-column false positive and the placeholder filter, wired into `npm test` ahead of the smoke test. It caught two of the bugs above during development.
+
+### Changed
+
+- **BREAKING (tool output):** `list_variablisation_candidates` returns `flagged` (each item carrying a `signals` array) and `counts` instead of `candidates` and `count`. Anything reading the old field names needs updating; the bundled skills already are.
+
 ## [0.18.0] - 2026-08-26
 
 ### Added

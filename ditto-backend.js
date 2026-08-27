@@ -280,12 +280,18 @@ export async function fetchLibraryComponents() {
   return all;
 }
 
-export async function linkComponent(componentMongoId, projectMongoId, textItemIds) {
-  return backendFetch(`/library-component/${componentMongoId}/link`, {
-    method: "PATCH",
-    body: JSON.stringify({ projectId: projectMongoId, textItemIds, wasSuggested: false }),
-  });
-}
+// DELIBERATELY REMOVED: linkComponent() (PATCH /library-component/{id}/link).
+//
+// Library components are the design system's shared strings, owned by one person
+// (the design-system designer / content writer) and edited only by them in the
+// Ditto web app. This server had been linking items to components automatically
+// during figma_link_pass, which modified the design system as a side effect of a
+// handoff — done by whoever happened to run it, without review.
+//
+// There is now NO component write path in this module, by design. Do not add one:
+// creating, renaming, re-linking, re-texting or translating a component all
+// belong to its owner. fetchLibraryComponents() above is read-only and stays,
+// because knowing a component exists is how you avoid duplicating it.
 
 // ─── Style-guide endpoints (rules read/write) ─────────────────────────────────
 //

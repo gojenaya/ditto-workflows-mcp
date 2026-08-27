@@ -70,5 +70,55 @@ for (const t of ['4','12','9:41','Button']) {
   if (!isPlaceholder(t)) { console.log('  ❌ mock junk no longer filtered:', t); f++; }
 }
 console.log('  ✅ mock junk (4, 12, 9:41, Button) still filtered');
-console.log('\n' + (f ? `❌ ${f} failure(s)` : '✅ variablise-detection: all checks passed'));
+
+
+// ─── COMPONENT PROTECTION ────────────────────────────────────────────────────
+// Library components are the design system's shared strings, owned by one
+// person. The server must never create, modify, re-link or translate one, nor
+// write to a project item governed by one. These are structural checks over the
+// source: a component write path reappearing is the regression to catch.
+console.log('\n--- COMPONENT PROTECTION ---');
+const backendSrc = fs.readFileSync(path.join(__dirname, '..', 'ditto-backend.js'), 'utf8');
+const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'mcp-server.js'), 'utf8');
+
+// 1. No write of any kind to a library-component endpoint. Scan actual
+// backendFetch calls, not raw text — the file legitimately *mentions*
+// "PATCH /library-component/..." in the comment explaining the removal.
+const stripComments = (src) => src.split('\n').filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+const compWrites = [...stripComments(backendSrc).matchAll(/backendFetch\(\s*`([^`]*library-component[^`]*)`\s*,\s*\{([^}]*)\}/g)]
+  .filter(m => /method:\s*"(POST|PATCH|PUT|DELETE)"/.test(m[2]));
+if (compWrites.length) { console.log('  ❌ component write path in ditto-backend.js:', compWrites.map(m=>m[1])); f++; }
+else console.log('  ✅ ditto-backend.js has no library-component write path');
+
+// 2. linkComponent must stay gone — it ran on every handoff and edited the DS.
+if (/export\s+async\s+function\s+linkComponent/.test(backendSrc)) { console.log('  ❌ linkComponent() is back in ditto-backend.js'); f++; }
+else console.log('  ✅ linkComponent() is absent');
+if (/\blinkComponent\s*\(/.test(serverSrc)) { console.log('  ❌ mcp-server.js still calls linkComponent()'); f++; }
+else console.log('  ✅ mcp-server.js never calls linkComponent()');
+
+// 3. Every tool that writes items must consult the guard.
+for (const tool of ['write_translations','update_text','update_status','link_variables','rename_developer_id','merge_duplicate_items','apply_review_sheet']) {
+  const start = serverSrc.indexOf(`  "${tool}",`);
+  if (start < 0) { console.log('  ❌ tool not found:', tool); f++; continue; }
+  const next = serverSrc.indexOf('server.registerTool', start);
+  const body = serverSrc.slice(start, next > 0 ? next : undefined);
+  const guarded = /componentProtectedIds|componentGuardReport|ws_comp|componentLinked/.test(body);
+  if (!guarded) { console.log('  ❌ write tool has NO component guard:', tool); f++; }
+  else console.log('  ✅ guarded:', tool);
+}
+
+// 4. Work lists must not offer component-governed items in the first place.
+for (const tool of ['list_untranslated','list_for_review','list_variablisation_candidates']) {
+  const start = serverSrc.indexOf(`  "${tool}",`);
+  const next = serverSrc.indexOf('server.registerTool', start);
+  const body = serverSrc.slice(start, next > 0 ? next : undefined);
+  if (!/componentProtectedIds/.test(body)) { console.log('  ❌ work list does not exclude component items:', tool); f++; }
+  else console.log('  ✅ excludes component items:', tool);
+}
+
+// 5. Reads stay allowed — knowing a component exists is how you avoid duplicating it.
+if (!/registerTool\(\s*\n?\s*"list_components"/.test(serverSrc)) { console.log('  ❌ list_components (read) was removed'); f++; }
+else console.log('  ✅ list_components still available (read-only)');
+
+console.log('\n' + (f ? `❌ ${f} failure(s)` : '✅ all checks passed'));
 process.exit(f ? 1 : 0);

@@ -22,7 +22,7 @@ import { getDefaultVariant, readConfigDefaultVariant, setDefaultVariant, getExcl
 import {
   setSessionToken, getSessionToken, tokenExpiry, validateToken,
   fetchWorkspaceDump, renameDevId, projectMongoIdByDevId,
-  createTextItem, connectTextItems, fetchLibraryComponents, linkComponent,
+  createTextItem, connectTextItems, fetchLibraryComponents,
   newObjectId, toRichText, TOKEN_HELP,
   listStyleGuides, listStyleGuideRules, addStyleGuideRules,
   fetchVariables,
@@ -333,6 +333,125 @@ function pairLabelsWithValues(itemsWithRects) {
   return { pairs, orphanLabels };
 }
 
+// ─── COMPONENT PROTECTION ────────────────────────────────────────────────────
+//
+// Library components are the design system's shared strings. They are owned by
+// one person — the design-system designer / content writer — and edited only by
+// them, in the Ditto web app. This server must therefore NEVER create, modify,
+// re-link or translate a component, and never write to a project item that is
+// governed by one, because that edit either propagates to the component or
+// detaches the item from it. Both are design-system changes made by the wrong
+// hand. Reads (list_components, search_text) stay allowed and are encouraged —
+// knowing a component exists is how you avoid duplicating it.
+//
+// Detection: the backend dump's `ws_comp` field is the item→component link and
+// is authoritative. The PUBLIC API DOES NOT EXPOSE IT AT ALL (verified 27 Aug
+// 2026: a component-linked item comes back with no component field of any kind),
+// so without a session token the only available signal is an exact text match
+// against the component library. That is approximate — it over-blocks ordinary
+// copy that happens to read "Confirm" — so it is reported as unverified rather
+// than presented as fact.
+async function componentProtectedIds(projectId) {
+  try {
+    const mongoProjectId = await projectMongoIdByDevId(projectId);
+    const dump = await fetchWorkspaceDump();
+    const ids = new Set();
+    for (const it of dump) {
+      if (it.doc_ID === mongoProjectId && it.developerId && it.ws_comp) ids.add(it.developerId);
+    }
+    return { ids, precise: true };
+  } catch (err) {
+    // Fall back to the public API's component list and match on exact text.
+    try {
+      const [items, components] = await Promise.all([
+        fetchBaseItems(projectId),
+        dittoFetch("/components"),
+      ]);
+      const compText = new Set(
+        components.map((c) => (c.text || "").trim()).filter(Boolean),
+      );
+      const ids = new Set();
+      for (const i of items) {
+        if (i.text && compText.has(i.text.trim())) ids.add(i.id);
+      }
+      return { ids, precise: false, reason: err.message };
+    } catch {
+      return { ids: new Set(), precise: false, unavailable: true, reason: err.message };
+    }
+  }
+}
+
+// write_translations addresses items by developer ID with NO projectId, so its
+// guard has to cover the whole workspace. Dev IDs are unique per project, so the
+// same ID can exist twice — component-linked in one project, free in another.
+// Without a projectId we cannot tell which one a write would land on, so if ANY
+// item with that dev ID is component-linked, the ID is withheld. Over-blocking
+// is the right failure direction here: the alternative is editing the design
+// system by accident.
+async function componentProtectedIdsWorkspace() {
+  try {
+    const dump = await fetchWorkspaceDump();
+    const ids = new Set();
+    for (const it of dump) if (it.developerId && it.ws_comp) ids.add(it.developerId);
+    return { ids, precise: true };
+  } catch (err) {
+    try {
+      const components = await dittoFetch("/components");
+      const compText = new Set(components.map((c) => (c.text || "").trim()).filter(Boolean));
+      const filter = JSON.stringify({ statuses: ["NONE", "WIP", "REVIEW", "FINAL"] });
+      const all = await dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`);
+      const ids = new Set();
+      for (const i of all) {
+        if (i.variantId === null && i.text && compText.has(i.text.trim())) ids.add(i.id);
+      }
+      return { ids, precise: false, reason: err.message };
+    } catch {
+      return { ids: new Set(), precise: false, unavailable: true, reason: err.message };
+    }
+  }
+}
+
+// Split a list of developer IDs into what may be written and what must not.
+function withheldForComponents(devIds, guard) {
+  const allowed = [];
+  const withheld = [];
+  for (const id of devIds) {
+    if (guard.ids.has(id)) withheld.push(id);
+    else allowed.push(id);
+  }
+  return { allowed, withheld };
+}
+
+// The block that every guarded tool adds to its response, so a refusal is never
+// silent and the user can see exactly what was left alone and why.
+function componentGuardReport(withheldRaw, guard) {
+  const withheld = [...new Set(withheldRaw)];
+  if (!withheld.length && guard.precise) return {};
+  const out = {};
+  if (withheld.length) {
+    out.componentLinkedSkipped = withheld;
+    out.componentLinkedNote =
+      "These items are governed by a library component, so this server left them untouched — components " +
+      "are the design system's shared strings and are edited only by their owner, in the Ditto web app. " +
+      "Ask that owner to make the change on the component; it then applies everywhere at once." +
+      (guard.precise
+        ? ""
+        : " NOTE: linkage could not be read precisely (no session token), so this list is based on an exact " +
+          "text match against the component library and may include items that merely share a component's " +
+          "wording. Run login_to_ditto for an exact check.");
+  }
+  if (!guard.precise && !withheld.length) {
+    out.componentGuardNote = guard.unavailable
+      ? "Component linkage could NOT be checked (" +
+        guard.reason +
+        "). Nothing here is confirmed safe to write; run login_to_ditto so component-linked items can be " +
+        "identified and skipped."
+      : "Component linkage was checked approximately (text match against the component library) because the " +
+        "backend was unreachable. Run login_to_ditto for an exact check.";
+  }
+  return out;
+}
+
 // ─── TRANSLATION MEMORY ──────────────────────────────────────────────────────
 // The variant's FINAL-translation index, built straight from the API. Shared by
 // refresh_translation_assets (which renders it to Markdown for humans) and
@@ -497,7 +616,7 @@ function mdTable(headers, rows, wrapCols = [], maxWidth = MD_WRAP) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.20.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.21.0" });
 
 server.registerTool(
   "list_projects",
@@ -624,15 +743,26 @@ server.registerTool(
       fetchBaseItems(projectId),
       fetchVariantIds(projectId, variantId),
     ]);
-    const untranslated = base
-      .filter((i) => !have.has(i.id) && isTranslatable(i.text))
+    // A component's translations belong to the component, so its items are not
+    // work for a translator here — offering them is what leads to writing them.
+    const guard = await componentProtectedIds(projectId);
+    const candidates = base.filter((i) => !have.has(i.id) && isTranslatable(i.text));
+    const untranslated = candidates
+      .filter((i) => !guard.ids.has(i.id))
       .map((i) => ({ id: i.id, text: i.text }));
+    const componentWithheld = candidates.filter((i) => guard.ids.has(i.id)).map((i) => i.id);
     return {
       content: [
         {
           type: "text",
           text: JSON.stringify(
-            { projectId, variantId, count: untranslated.length, items: untranslated },
+            {
+              projectId,
+              variantId,
+              count: untranslated.length,
+              items: untranslated,
+              ...componentGuardReport(componentWithheld, guard),
+            },
             null,
             2,
           ),
@@ -662,20 +792,37 @@ server.registerTool(
     if (!translations.length) {
       return { content: [{ type: "text", text: "No translations provided." }] };
     }
-    await dittoPatch({
-      variantId,
-      forceVariantCreation: true,
-      updates: translations.map((t) => ({
-        developerId: t.id,
-        text: t.text,
-        status,
-      })),
-    });
+    // A component's translations belong to the component, and therefore to its
+    // owner. Never write a variant onto a component-governed item.
+    const guard = await componentProtectedIdsWorkspace();
+    const { allowed, withheld } = withheldForComponents(translations.map((t) => t.id), guard);
+    const allow = new Set(allowed);
+    const writable = translations.filter((t) => allow.has(t.id));
+    if (writable.length) {
+      await dittoPatch({
+        variantId,
+        forceVariantCreation: true,
+        updates: writable.map((t) => ({
+          developerId: t.id,
+          text: t.text,
+          status,
+        })),
+      });
+    }
     return {
       content: [
         {
           type: "text",
-          text: `Wrote ${translations.length} '${variantId}' variant(s) at status ${status}.`,
+          text: JSON.stringify(
+            {
+              wrote: writable.length,
+              variantId,
+              status,
+              ...componentGuardReport(withheld, guard),
+            },
+            null,
+            2,
+          ),
         },
       ],
     };
@@ -721,9 +868,14 @@ server.registerTool(
       dittoFetch("/variables"),
     ]);
 
-    const eligible = base.filter(
+    // Variablising a component-governed item would rewrite the design system's
+    // shared string, so those items are not candidates.
+    const compGuard = await componentProtectedIds(projectId);
+    const eligibleAll = base.filter(
       (i) => i.text?.trim() && !i.text.includes("{{") && !isStatusBarTime(i.text),
     );
+    const eligible = eligibleAll.filter((i) => !compGuard.ids.has(i.id));
+    const componentWithheld = eligibleAll.filter((i) => compGuard.ids.has(i.id)).map((i) => i.id);
 
     // Signal 2 needs Figma geometry, which only the backend dump carries. It is
     // the signal that catches split label/value layers, so it matters — but a
@@ -814,6 +966,7 @@ server.registerTool(
                 ).length,
                 unjudged: unjudged.length,
               },
+              ...componentGuardReport(componentWithheld, compGuard),
               readUnjudgedToo:
                 "The flagged list is a recall aid, not a verdict. Semantic cases — merchant and personal " +
                 "names, word-form counts, placeholder junk, standalone currency codes — appear only in " +
@@ -871,20 +1024,35 @@ server.registerTool(
     if (!updates.length) {
       return { content: [{ type: "text", text: "No updates provided." }] };
     }
-    const { updated, skipped } = await patchSkippingUnknown({
-      updates: updates.map((u) => ({
-        developerId: u.id,
-        text: u.text,
-        projectId,
-        ...(status ? { status } : {}),
-      })),
-    });
+    const guard = await componentProtectedIds(projectId);
+    const { allowed, withheld } = withheldForComponents(updates.map((u) => u.id), guard);
+    const allow = new Set(allowed);
+    const writable = updates.filter((u) => allow.has(u.id));
+    let updated = 0;
+    let skipped = [];
+    if (writable.length) {
+      ({ updated, skipped } = await patchSkippingUnknown({
+        updates: writable.map((u) => ({
+          developerId: u.id,
+          text: u.text,
+          projectId,
+          ...(status ? { status } : {}),
+        })),
+      }));
+    }
     return {
       content: [{
         type: "text",
-        text: `Updated text on ${updated} base item(s).` +
-          (status ? ` Status → ${status}.` : "") +
-          (skipped.length ? ` Skipped ${skipped.length} unknown ID(s): ${skipped.join(", ")}` : ""),
+        text: JSON.stringify(
+          {
+            updated,
+            ...(status ? { status } : {}),
+            ...(skipped.length ? { unknownIdsSkipped: skipped } : {}),
+            ...componentGuardReport(withheld, guard),
+          },
+          null,
+          2,
+        ),
       }],
     };
   },
@@ -922,22 +1090,34 @@ server.registerTool(
     for (const i of all) {
       if (i.variantId === null && i.pluralForm === null) baseText.set(i.id, i.text);
     }
-    const items = all
-      .filter(
-        (i) =>
-          i.variantId === variantId &&
-          i.pluralForm === null &&
-          statuses.includes(i.status) &&
-          baseText.has(i.id),
-      )
+    // Reviewing a component's translation implies editing it, which is the
+    // component owner's call — keep those rows out of the reviewer's queue.
+    const guard = await componentProtectedIds(projectId);
+    const queue = all.filter(
+      (i) =>
+        i.variantId === variantId &&
+        i.pluralForm === null &&
+        statuses.includes(i.status) &&
+        baseText.has(i.id),
+    );
+    const items = queue
+      .filter((i) => !guard.ids.has(i.id))
       .map((i) => ({ id: i.id, base: baseText.get(i.id), translation: i.text, status: i.status }));
+    const componentWithheld = queue.filter((i) => guard.ids.has(i.id)).map((i) => i.id);
 
     return {
       content: [
         {
           type: "text",
           text: JSON.stringify(
-            { projectId, variantId, statuses, count: items.length, items },
+            {
+              projectId,
+              variantId,
+              statuses,
+              count: items.length,
+              items,
+              ...componentGuardReport(componentWithheld, guard),
+            },
             null,
             2,
           ),
@@ -1061,18 +1241,28 @@ server.registerTool(
       else { deferred.push({ id, reason: "no verdict" }); }
     }
 
-    if (edits.length) {
+    // A reviewer can hand back a sheet row for a component-governed item; the
+    // sheet is not authority to edit the design system.
+    const guard = await componentProtectedIds(projectId);
+    const componentWithheld = [
+      ...edits.filter((e) => guard.ids.has(e.id)).map((e) => e.id),
+      ...approvals.filter((id) => guard.ids.has(id)),
+    ];
+    const writableEdits = edits.filter((e) => !guard.ids.has(e.id));
+    const writableApprovals = approvals.filter((id) => !guard.ids.has(id));
+
+    if (writableEdits.length) {
       await dittoPatch({
         variantId,
         forceVariantCreation: true,
-        updates: edits.map((e) => ({ developerId: e.id, text: e.text, status: "FINAL" })),
+        updates: writableEdits.map((e) => ({ developerId: e.id, text: e.text, status: "FINAL" })),
       });
     }
     let promoted = 0;
-    if (approvals.length) {
+    if (writableApprovals.length) {
       const r = await patchSkippingUnknown({
         variantId,
-        updates: approvals.map((id) => ({ developerId: id, status: "FINAL", projectId })),
+        updates: writableApprovals.map((id) => ({ developerId: id, status: "FINAL", projectId })),
       });
       promoted = r.updated;
     }
@@ -1081,8 +1271,9 @@ server.registerTool(
         type: "text",
         text: JSON.stringify({
           projectId, variantId,
-          edited: edits.length, approved: promoted, deferred: deferred.length,
+          edited: writableEdits.length, approved: promoted, deferred: deferred.length,
           deferredItems: deferred,
+          ...componentGuardReport(componentWithheld, guard),
         }, null, 2),
       }],
     };
@@ -1134,6 +1325,23 @@ server.registerTool(
     }
     if (!targetIds.length) {
       return { content: [{ type: "text", text: "No matching items to update." }] };
+    }
+
+    // Component-governed items are off limits, base or variant alike.
+    const guard = await componentProtectedIds(projectId);
+    let componentWithheld = [];
+    ({ allowed: targetIds, withheld: componentWithheld } = withheldForComponents(targetIds, guard));
+    if (!targetIds.length) {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(
+            { updated: 0, ...componentGuardReport(componentWithheld, guard) },
+            null,
+            2,
+          ),
+        }],
+      };
     }
 
     // Promoting a variant that doesn't exist yet CREATES it with empty text —
@@ -1704,33 +1912,34 @@ server.registerTool(
       }
     }
 
-    // 6. Component links: texts that also exist as library components get
-    //    linked to them (skipping items already linked — idempotent).
-    const componentLinks = [];
+    // 6. Components: REPORT ONLY — never link, never write.
+    //    This step used to PATCH /library-component/{id}/link on every run,
+    //    silently editing the design system's shared strings as a side effect of
+    //    a handoff. Components are owned by one person (the design-system
+    //    designer / content writer) and changed only by them in the Ditto web
+    //    app, so the link is now theirs to make. We just point out the overlap,
+    //    which is the genuinely useful half: it tells you this screen is
+    //    duplicating copy a component already owns.
+    const componentMatches = [];
     try {
       const compIndex = new Map();
       for (const c of await fetchLibraryComponents()) {
         const key = normalizeText(c.text);
         if (key && !compIndex.has(key)) compIndex.set(key, c);
       }
-      const linkByComp = new Map();
       for (const { item } of [...toLink, ...created]) {
         const hit = compIndex.get(normalizeText(item.text));
         if (!hit || !item._id) continue;
-        if (Array.isArray(hit.instances) && hit.instances.includes(item._id)) continue;
-        if (!linkByComp.has(hit._id)) linkByComp.set(hit._id, { component: hit, itemIds: [] });
-        linkByComp.get(hit._id).itemIds.push(item._id);
-      }
-      for (const [compId, { component, itemIds }] of linkByComp) {
-        try {
-          await linkComponent(compId, mongoProjectId, itemIds);
-          componentLinks.push({ component: component.developerId || component.name, items: itemIds.length });
-        } catch (err) {
-          componentLinks.push({ component: component.developerId || component.name, error: err.message });
-        }
+        const already = Array.isArray(hit.instances) && hit.instances.includes(item._id);
+        componentMatches.push({
+          item: item.developerId || item._id,
+          text: item.text,
+          component: hit.developerId || hit.name,
+          alreadyLinked: already,
+        });
       }
     } catch (err) {
-      componentLinks.push({ error: `component pass skipped: ${err.message}` });
+      componentMatches.push({ error: `component match pass skipped: ${err.message}` });
     }
 
     // 7. Re-fetch for the auto-assigned dev IDs of created items, and map each
@@ -1818,7 +2027,16 @@ server.registerTool(
               ...(floating.length ? { floating } : {}),
               ...(ambiguous.length ? { ambiguous } : {}),
               ...(createFailed.length ? { createFailed } : {}),
-              ...(componentLinks.length ? { componentLinks } : {}),
+              ...(componentMatches.length
+                ? {
+                    componentMatches,
+                    componentMatchesNote:
+                      "Read-only. These texts also exist as library components; this server does NOT link or " +
+                      "modify components — that is the design-system owner's call, made in the Ditto web app. " +
+                      "Items with alreadyLinked: true are governed by their component, so their copy and " +
+                      "translations must be changed on the component, not here.",
+                  }
+                : {}),
             },
             null,
             2,
@@ -1855,10 +2073,14 @@ server.registerTool(
     // devId → mongo _id within the project
     const idMap = new Map();
     const backendDevIds = new Set();
+    const componentLinked = new Set();
     for (const it of dump) {
       if (it.doc_ID !== mongoProjectId || !it.developerId) continue;
       idMap.set(it.developerId, it._id);
       backendDevIds.add(it.developerId);
+      // How a design-system string is identified in a project is the component
+      // owner's call, so component-governed items are not renamed here.
+      if (it.ws_comp) componentLinked.add(it.developerId);
     }
 
     // 3. Validate + apply sequentially.
@@ -1867,6 +2089,15 @@ server.registerTool(
     for (const { from, to } of renames) {
       if (from === to) {
         results.push({ from, to, status: "skipped", reason: "from and to are identical" });
+      } else if (componentLinked.has(from)) {
+        results.push({
+          from,
+          to,
+          status: "skipped",
+          reason:
+            "governed by a library component — components and their project items are the design-system " +
+            "owner's to change, in the Ditto web app",
+        });
       } else if (!idMap.has(from)) {
         results.push({ from, to, status: "skipped", reason: "no item with this developer ID in the project" });
       } else if (backendDevIds.has(to) || pendingTo.has(to)) {
@@ -1953,11 +2184,32 @@ server.registerTool(
 
     const idMap = new Map();
     const oldTextById = new Map();
+    // Component-governed items are excluded outright: variablising one would
+    // rewrite the design system's shared string.
+    const componentLinked = new Set();
     for (const it of dump) {
       if (it.doc_ID === mongoProjectId && it.developerId) {
+        if (it.ws_comp) {
+          componentLinked.add(it.developerId);
+          continue;
+        }
         idMap.set(it.developerId, it._id);
         oldTextById.set(it.developerId, it.text ?? "");
       }
+    }
+    const componentWithheld = updates.filter((u) => componentLinked.has(u.id)).map((u) => u.id);
+    updates = updates.filter((u) => !componentLinked.has(u.id));
+    if (!updates.length) {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(
+            { projectId, counts: { updated: 0 }, ...componentGuardReport(componentWithheld, { ids: componentLinked, precise: true }) },
+            null,
+            2,
+          ),
+        }],
+      };
     }
 
     const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
@@ -2045,6 +2297,7 @@ server.registerTool(
             {
               projectId,
               counts,
+              ...componentGuardReport(componentWithheld, { ids: componentLinked, precise: true }),
               variablesCreated: created,
               ...(createdWithoutExample.length
                 ? {
@@ -2127,7 +2380,13 @@ server.registerTool(
   async ({ projectId, apply = false, groups, renameKeepers = true }) => {
     const mongoProjectId = await projectMongoIdByDevId(projectId);
     const dump = await fetchWorkspaceDump();
-    const items = dump.filter((i) => i.doc_ID === mongoProjectId && i.developerId);
+    const allProjectItems = dump.filter((i) => i.doc_ID === mongoProjectId && i.developerId);
+    // Merging deletes items and moves their Figma instances. Doing that to a
+    // component-governed item would remove the design system's presence in this
+    // project, so those items are invisible to this tool entirely.
+    const componentLinkedIds = allProjectItems.filter((i) => i.ws_comp).map((i) => i.developerId);
+    const componentLinkedSet = new Set(componentLinkedIds);
+    const items = allProjectItems.filter((i) => !componentLinkedSet.has(i.developerId));
     const byDevId = new Map(items.map((i) => [i.developerId, i]));
     const instancesOf = (it) => it?.integrations?.figmaV2?.instances || [];
 
@@ -2251,6 +2510,14 @@ server.registerTool(
               projectId,
               apply,
               counts,
+              ...(componentLinkedIds.length
+                ? {
+                    componentLinkedExcluded: componentLinkedIds,
+                    componentLinkedNote:
+                      "Excluded from merging: these items are governed by library components, which only the " +
+                      "design-system owner changes (in the Ditto web app).",
+                  }
+                : {}),
               itemsRemoved: apply
                 ? report.filter((r) => r.status === "merged").reduce((a, r) => a + r.merge.length, 0)
                 : 0,

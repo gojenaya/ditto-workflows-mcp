@@ -42,6 +42,7 @@ Independent by construction: different variants are different variant writes wit
 
 ## Rules
 
+- **Components are never translated here.** A library component's translations belong to the component and are written by its owner in the Ditto web app. `list_untranslated` and `list_for_review` already leave component-governed items out, and `write_translations` refuses them (`componentLinkedSkipped`). If a component needs a translation, report it to the owner — do not route around it by writing to the project item.
 - The glossary lives in the MCP resource — read it fresh every run; never copy its rules into this skill or assume them from memory.
 - **Never grep or read `translation-memory.md` to look something up** — use `lookup_translation_memory`. The file's `<br>` wrapping and column padding are display artifacts that make ad-hoc matching quietly wrong; the tool matches on the real data and also surfaces conflicts, which the file omits by design.
 - Write at status **FINAL** directly — this variant has no review stage. (The review-process variant of this skill writes WIP and hands off to `/ditto-review`; this one does not.)

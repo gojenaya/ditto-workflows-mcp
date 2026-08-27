@@ -79,6 +79,8 @@ Every reviewer edit is a signal: Claude's translation was wrong in a way a human
 
 ## Rules
 
+
+- **Components are out of scope for review edits.** A component's copy and translations are the design-system owner's, changed in the Ditto web app. `list_for_review` omits component-governed rows and `apply_review_sheet` withholds them (`componentLinkedSkipped`); if a reviewer marks one, pass the note to the owner rather than writing it.
 - Never change a translation the reviewer didn't ask you to change — if you disagree, flag it and let them decide.
 - The guardrail flags, it does not fix: name the broken rule and its source, never attach a rewrite or "better" alternative.
 - Guardrail is high-precision by design — a false flag on intentional copy wastes the reviewer's time and erodes trust in the pass. When unsure whether something breaks a nameable rule, stay silent.

@@ -5,6 +5,26 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-08-27
+
+Library components are the design system's shared strings, owned by one person
+and edited only by them. This server was modifying them automatically. It no
+longer has any way to.
+
+### Fixed
+
+- **`figma_link_pass` silently modified the design system on every run.** Step 6 called `PATCH /library-component/{id}/link` to link matching texts to their library components — so any handoff, run by anyone, edited components as a side effect, with no review and no mention in the report. The step is now **read-only**: it reports `componentMatches` (which of this screen's texts duplicate a component, and whether they are already linked) and links nothing. Deciding to link is the component owner's call, made in the web app.
+- **`linkComponent()` is deleted from `ditto-backend.js`, and there is now no component write path in the module at all.** A comment marks the removal so it is not re-added as a "missing feature", and a regression test fails if any `library-component` write endpoint or a `linkComponent` definition/call reappears.
+- **Writes to component-*governed* items are refused.** A project item linked to a component carries the component's copy, so editing it either propagates to the design system or detaches the item — both are design-system changes made by the wrong hand. `write_translations`, `update_text`, `update_status`, `link_variables`, `rename_developer_id`, `merge_duplicate_items` and `apply_review_sheet` now withhold those items and report them under `componentLinkedSkipped` with the reason and what to do instead. Verified against production: `update_status` on the component-linked `confirm-cta` writes nothing and explains why.
+- **Component-governed items are no longer offered as work.** `list_untranslated`, `list_for_review` and `list_variablisation_candidates` exclude them, because presenting them as pending is what leads to writing them. On `profile` that removes 8 items from the variablisation candidate list.
+
+### Notes
+
+- **The public API does not expose component linkage at all** (verified 27 Aug 2026: a component-linked item returns no component field of any kind). Accurate detection therefore uses the backend dump's `ws_comp` and needs a session token. Without one the guard falls back to an exact text match against the component library — approximate and over-blocking, so it is labelled unverified in the response rather than presented as fact. Run `login_to_ditto` for an exact check.
+- **`write_translations` takes no `projectId`**, so its guard is workspace-wide: if any item anywhere carries that developer ID and is component-linked, the ID is withheld. Over-blocking is the correct failure direction when the alternative is editing the design system by accident.
+- Reads are unchanged and encouraged — `list_components` and `search_text` still cover the library, since knowing a component exists is how you avoid duplicating copy that already ships.
+- **What a write to a component-governed item actually does — propagate, detach, or error — is untested.** Finding out would mean modifying a real component, which is precisely what this release forbids, so the guard is preventive rather than characterised.
+
 ## [0.20.0] - 2026-08-27
 
 A configured default variant was silently ignored, so nothing was ever

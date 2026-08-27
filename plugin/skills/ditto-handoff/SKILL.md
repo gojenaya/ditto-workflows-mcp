@@ -1,11 +1,11 @@
 ---
 name: ditto-handoff
-description: Full Figma→Ditto handoff — paste a Figma frame link and it runs end to end without stopping: link the copy into a Ditto project, give new items semantic developer IDs, variablise hardcoded dynamic values, optionally translate into a variant (e.g. Arabic), and set everything to FINAL (no review stage). Use when the user pastes a Figma link to hand off, sync, or import a screen's copy into Ditto.
+description: Full Figma→Ditto handoff — paste a Figma frame link and it runs end to end without stopping: link the copy into a Ditto project, give new items semantic developer IDs, variablise hardcoded dynamic values, translate into the requested variant — or the configured default variant, automatically, with no need to name it in the prompt — and set everything to FINAL (no review stage). Use when the user pastes a Figma link to hand off, sync, or import a screen's copy into Ditto.
 ---
 
 # Figma → Ditto handoff
 
-One autonomous flow from a pasted Figma link to a finished batch: link-pass → semantic dev IDs → variablise dynamic content → optional variant translation → set everything to FINAL. Uses the unofficial backend tools (session login) plus the Figma REST API.
+One autonomous flow from a pasted Figma link to a finished batch: link-pass → semantic dev IDs → variablise dynamic content → variant translation (the configured default needs no prompting) → set everything to FINAL. Uses the unofficial backend tools (session login) plus the Figma REST API.
 
 **Run it end to end without stopping.** Apply your own best-judgement decisions (renames, variablisation, translations) as you go — do NOT pause to ask the user to approve each step. Only stop for a genuine blocker (missing session token, missing `FIGMA_API_KEY`, an ambiguous project) — never for routine approval.
 
@@ -13,7 +13,15 @@ One autonomous flow from a pasted Figma link to a finished batch: link-pass → 
 
 ## Arguments
 
-`/ditto-handoff [figmaUrl] [projectId] [variantId]` — all optional. If the Figma URL is missing, ask for a **"Copy link to selection"** link (right-click the frame/section in Figma — a plain file link won't work; it needs a `node-id`). If projectId is missing, call `list_projects` and ask the user to pick. If the user mentions a language/variant anywhere ("…and add Arabic", "translate to fr"), use it for the translation step; if none is mentioned, skip translation silently.
+`/ditto-handoff [figmaUrl] [projectId] [variantId]` — all optional. If the Figma URL is missing, ask for a **"Copy link to selection"** link (right-click the frame/section in Figma — a plain file link won't work; it needs a `node-id`). If projectId is missing, call `list_projects` and ask the user to pick.
+
+**Resolving which variant(s) to translate into — call `get_settings` first, every run.** Resolve in this order and stop at the first hit:
+
+1. An explicit `variantId` argument.
+2. A language the user mentioned anywhere in the prompt ("…and add Arabic", "translate to fr").
+3. **`get_settings().defaultVariant` — a configured default means translate, automatically.** Setting a default is the user saying "always this language"; making them repeat it in every prompt defeats the point of the setting. This step used to be missing entirely, so a configured default was silently ignored and nothing was ever translated.
+
+Only skip translation if all three are empty, or the user explicitly says not to translate. **Never ask which language when a default is configured, and never ask the user to create that variant** — `get_settings` returns `workspaceVariants` with `defaultVariantExists`, so check it: if it's listed, it exists, just translate. If `defaultVariantExists` is `false`, say so plainly and skip that variant (variants are created in the Ditto web app; no tool here creates them).
 
 ## Procedure (run straight through)
 
@@ -41,7 +49,7 @@ One autonomous flow from a pasted Figma link to a finished batch: link-pass → 
    - Then `merge_duplicate_items(projectId, apply: true, groups: [...])`. Deletion is irreversible, so scope it explicitly rather than letting auto-detection decide on a live project.
    - Do this **before** translating — merging after means paying to translate the same string several times and then deleting most of it.
 
-4. **Translate — only if a variant was given.** Delegate to `/ditto-translate`'s subagent pattern: **spawn one translation subagent per requested variant, in parallel (single message)**, each following the /ditto-translate Procedure for that variantId. Each returns only a compact summary `{variantId, wrote, skipped}` — do NOT translate inline in the handoff context (that's what keeps this orchestrator lean). In this variant translations write directly at FINAL. If no subagent capability, translate inline, one variant at a time. (Keeping the untranslated lists + glossaries inside the subagents is the token-efficiency win — the handoff context never loads them.)
+4. **Translate — for every variant resolved above (explicit, mentioned, or the configured default).** Delegate to `/ditto-translate`'s subagent pattern: **spawn one translation subagent per requested variant, in parallel (single message)**, each following the /ditto-translate Procedure for that variantId. Each returns only a compact summary `{variantId, wrote, skipped}` — do NOT translate inline in the handoff context (that's what keeps this orchestrator lean). In this variant translations write directly at FINAL. If no subagent capability, translate inline, one variant at a time. (Keeping the untranslated lists + glossaries inside the subagents is the token-efficiency win — the handoff context never loads them.)
 5. **Set everything to FINAL.** Move base items and each written variant to FINAL, using the status-list form:
    - Base: `update_status(projectId, status: "FINAL", fromStatus: ["NONE","WIP","REVIEW"])`.
    - Each variant: `update_status(projectId, status: "FINAL", variantId, fromStatus: ["NONE","WIP","REVIEW"])`.
@@ -52,6 +60,7 @@ One autonomous flow from a pasted Figma link to a finished batch: link-pass → 
 ## Rules
 
 - **On a live project, scope every write to this pass's own items.** Two rules in this skill are safe only in a sandbox. Step 2's rename covers connect-to-existing items — on production that overwrites dev IDs developers may already reference. Step 5's preferred `fromStatus` sweep promotes *everything* currently at NONE/WIP/REVIEW, including pre-existing items that have nothing to do with this handoff (on one real run that would have shipped 9 unrelated items to FINAL). For any project that isn't a playground: snapshot first, leave pre-existing dev IDs alone unless asked, and promote with an explicit `ids` list. Ask which project is which if you can't tell.
+- **A configured default variant is an instruction, not a hint.** Translate into it without being asked and without confirming the language. The only reasons to skip are an explicit "don't translate" or `defaultVariantExists: false`.
 - **Autonomous by default — don't stop for approvals.** Stop only for real blockers (auth, ambiguous project). If the user explicitly says they want to review as you go, switch to presenting each step for approval instead.
 - **This flow sets FINAL directly — there is no review gate.** Since FINAL is where copy ships, be conservative: skip the ambiguous and flag it in the report rather than committing a guess. Use the review-process variant of this skill when a human must sign off first.
 - Renames and variablisation are reversible (rename again; re-edit text).

@@ -30,6 +30,12 @@ export function getDefaultVariant() {
   return readConfig().defaultVariant || process.env.DITTO_DEFAULT_VARIANT || null;
 }
 
+// Whether the default came from the persisted config rather than the env — so
+// get_settings can tell the user WHERE the value it is acting on is set.
+export function readConfigDefaultVariant() {
+  return readConfig().defaultVariant || null;
+}
+
 export function setDefaultVariant(variantId) {
   const cfg = readConfig();
   cfg.defaultVariant = variantId;

@@ -9,6 +9,7 @@ Works with any Ditto workspace — auth is your own workspace API key. A few ext
 | Tool | What it does |
 |---|---|
 | `list_projects` | Projects in the workspace (id + name) |
+| `get_settings()` | Read this install's config — `defaultVariant` (and whether it came from the config file or `DITTO_DEFAULT_VARIANT`), the workspace's real variants with `defaultVariantExists`, excluded projects, data paths and session-token expiry. Call it at the start of a handoff or translation flow: **a configured default variant means translate automatically**, with no language named in the prompt and no need to ask the user to create the variant |
 | `set_default_variant(variantId)` | Set the default variant once (e.g. `ar`, `fr`); saved to `~/.ditto-workflows-mcp/config.json` |
 | `set_excluded_projects(projectIds[])` | Test/sandbox projects to skip when building the translation memory (never seed real translations from them) |
 | `list_untranslated(projectId, variantId?)` | Base items missing the variant |

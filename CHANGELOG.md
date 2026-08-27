@@ -5,6 +5,28 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-08-27
+
+A configured default variant was silently ignored, so nothing was ever
+translated unless the user named a language in the prompt — defeating the point
+of the setting.
+
+### Fixed
+
+- **`/ditto-handoff` ignored the configured default variant entirely.** Its Arguments section said "if none is mentioned, skip translation silently" and step 4 was gated on "only if a variant was given", where *given* meant an explicit argument or a language in the prompt. A user who had set `set_default_variant` (or `DITTO_DEFAULT_VARIANT`) got a handoff that ran every other step and quietly skipped translation. Variant resolution is now explicit and ordered: `variantId` argument → language named in the prompt → **configured default**, and translation only skips when all three are empty or the user says not to.
+- **The default variant was unreadable, so no skill could act on it.** `getDefaultVariant()` was internal — used only by `requireVariant()` as a per-call fallback — and no tool returned it. The model had no way to discover that a default existed, which is *why* the skill's logic could never account for one. Fixing the skill without exposing the value would have changed nothing.
+- **Users were being asked to confirm or "create" a variant that already existed.** Nothing exposed the workspace's variant list, so there was no way to check. `get_settings` now returns `workspaceVariants` with a `defaultVariantExists` flag, and both skills say: if it's listed, translate into it — don't ask.
+
+### Added
+
+- **`get_settings()`** — the configuration read-back that was missing: `defaultVariant` plus `defaultVariantSource` (config file vs env, so it's clear which value is in play), the workspace's variants from `GET /v2/variants` with `defaultVariantExists`, `excludedProjects`, `configPath`/`dataDir`, and session-token expiry. It also carries a `guidance` string stating the expected behaviour, so the setting explains itself at the point of use rather than only in a skill file.
+- `readConfigDefaultVariant()` in `config.js`, so `get_settings` can report *where* the default is configured rather than just its value.
+
+### Changed
+
+- **`/ditto-translate` now resolves the variant up front via `get_settings` when none is named.** The individual tools already fell back server-side, but the parallel-subagent pattern needs a concrete variant ID per agent, so relying on that fallback meant it could not spawn anything. It also no longer asks which language when a default is set.
+- `/ditto-handoff`'s description and summary line now state that the configured default is translated automatically, and a new rule records that a configured default is an instruction, not a hint.
+
 ## [0.19.0] - 2026-08-27
 
 Bare numeric values — order numbers, reference IDs, account numbers — were never

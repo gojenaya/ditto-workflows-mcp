@@ -18,7 +18,7 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { dittoFetch, dittoPatch, createVariables, deleteTextItems } from "./ditto-api.js";
-import { getDefaultVariant, setDefaultVariant, getExcludedProjects, setExcludedProjects, DATA_DIR, CONFIG_PATH } from "./config.js";
+import { getDefaultVariant, readConfigDefaultVariant, setDefaultVariant, getExcludedProjects, setExcludedProjects, DATA_DIR, CONFIG_PATH } from "./config.js";
 import {
   setSessionToken, getSessionToken, tokenExpiry, validateToken,
   fetchWorkspaceDump, renameDevId, projectMongoIdByDevId,
@@ -497,7 +497,7 @@ function mdTable(headers, rows, wrapCols = [], maxWidth = MD_WRAP) {
 
 // ─── SERVER ────────────────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.19.0" });
+const server = new McpServer({ name: "ditto-workflows-mcp", version: "0.20.0" });
 
 server.registerTool(
   "list_projects",
@@ -1394,6 +1394,72 @@ server.registerTool(
   async ({ projectIds }) => {
     setExcludedProjects(projectIds);
     return { content: [{ type: "text", text: `Excluded projects set to: ${projectIds.join(", ") || "(none)"} (saved to ${CONFIG_PATH}).` }] };
+  },
+);
+
+server.registerTool(
+  "get_settings",
+  {
+    title: "Read the configured settings (default variant, exclusions)",
+    description:
+      "Report this install's configuration and the workspace's real variants. **Call this at the start of a " +
+      "handoff or translation flow.** The default variant is the point: it is persisted locally (config file " +
+      "or DITTO_DEFAULT_VARIANT), so a user who has set it expects translation to happen WITHOUT naming a " +
+      "language in every prompt — and there was previously no way to read it back, so it was invisible and " +
+      "silently ignored. Also lists the workspace's variants with `defaultVariantExists`, so a configured " +
+      "variant never needs to be confirmed with the user or 'created': if it is listed, just translate into it.",
+    inputSchema: {},
+  },
+  async () => {
+    const defaultVariant = getDefaultVariant();
+    const source = defaultVariant
+      ? readConfigDefaultVariant()
+        ? "config file"
+        : "DITTO_DEFAULT_VARIANT env"
+      : null;
+    let variants = null;
+    let variantsError;
+    try {
+      variants = (await dittoFetch("/variants")).map((v) => ({ id: v.id, name: v.name }));
+    } catch (err) {
+      variantsError = err.message;
+    }
+    const token = getSessionToken();
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              defaultVariant,
+              defaultVariantSource: source,
+              ...(variants
+                ? {
+                    workspaceVariants: variants,
+                    defaultVariantExists: defaultVariant
+                      ? variants.some((v) => v.id === defaultVariant)
+                      : null,
+                  }
+                : { workspaceVariantsError: variantsError }),
+              excludedProjects: getExcludedProjects(),
+              configPath: CONFIG_PATH,
+              dataDir: DATA_DIR,
+              sessionToken: token
+                ? { present: true, expires: tokenExpiry(token) }
+                : { present: false, note: "Backend tools need login_to_ditto." },
+              guidance: defaultVariant
+                ? `A default variant ('${defaultVariant}') is configured, so translate into it automatically — ` +
+                  "do not ask the user which language, and do not ask them to create the variant if it is " +
+                  "listed in workspaceVariants. Only skip translation if they explicitly say not to."
+                : "No default variant configured, so skip translation unless the user names a language. " +
+                  "set_default_variant makes it automatic from then on.",
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
   },
 );
 

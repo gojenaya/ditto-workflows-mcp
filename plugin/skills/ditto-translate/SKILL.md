@@ -9,7 +9,9 @@ Glossary-aware translation of a project's untranslated strings using the ditto-w
 
 ## Arguments
 
-`/ditto-translate [projectId] [variantId...]` — all optional. If projectId is missing, call `list_projects` and ask the user to pick. If no variant is given, the tools use the configured default variant. One or more variants may be requested (e.g. "Arabic and Hindi").
+`/ditto-translate [projectId] [variantId...]` — all optional. If projectId is missing, call `list_projects` and ask the user to pick. One or more variants may be requested (e.g. "Arabic and Hindi").
+
+**If no variant is named, call `get_settings` and use `defaultVariant`.** Don't ask the user which language — a configured default is them having already answered that, and don't ask them to create the variant either: `workspaceVariants` in the same response tells you whether it exists. The individual tools do fall back to the default server-side when `variantId` is omitted, but the subagent pattern below needs a concrete variant ID per agent, so resolve it explicitly up front. Stop and say so only if there is no default and none was named.
 
 ## Execution — delegate translation to a subagent per variant (token-efficient, parallel)
 

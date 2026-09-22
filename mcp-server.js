@@ -1538,18 +1538,31 @@ server.registerTool(
     const meta = Object.fromEntries(REASON_CATEGORIES.map((c) => [c.code, c]));
     const byVariant = {};
     for (const e of entries) {
-      const v = (byVariant[e.variantId] ||= { total: 0, categories: {}, pairs: {} });
+      const v = (byVariant[e.variantId] ||= { total: 0, categories: {}, pairs: {}, rationales: {} });
       v.total++;
       const cat = (v.categories[e.category] ||= { count: 0, examples: [] });
       cat.count++;
       if (cat.examples.length < 3) cat.examples.push({ base: e.base, from: e.from, to: e.to, detail: e.detail });
-      // The same source term corrected the same way more than once is the
-      // strongest signal available — that is a glossary row waiting to happen.
+      // Two signals, because they answer different questions.
+      //
+      // The same source term corrected the same way is a GLOSSARY row waiting
+      // to happen — one string, one settled translation.
+      //
+      // Different strings corrected for the same reason is a VOICE RULE waiting
+      // to happen, and it is the more valuable of the two: "masdar avoids
+      // assuming gender" applied to three different CTAs is a rule about CTAs,
+      // not about those three strings. Keying only on the exact string would
+      // miss it entirely, which is the opposite of what this tool is for.
       if (e.from !== e.to) {
         const k = `${e.category}::${e.base}::${e.to}`;
         const p = (v.pairs[k] ||= { category: e.category, base: e.base, corrected: e.to, count: 0, details: [] });
         p.count++;
         if (e.detail && !p.details.includes(e.detail)) p.details.push(e.detail);
+
+        const rk = `${e.category}::${(e.detail || "").trim().toLowerCase()}`;
+        const r = (v.rationales[rk] ||= { category: e.category, rationale: e.detail || "(no detail given)", count: 0, examples: [] });
+        r.count++;
+        if (r.examples.length < 4) r.examples.push({ base: e.base, from: e.from, to: e.to });
       }
     }
 
@@ -1564,9 +1577,22 @@ server.registerTool(
           severity: meta[code]?.severity, examples: c.examples,
         }))
         .sort((a, b) => b.count - a.count);
+      const repeatedRationales = Object.values(d.rationales)
+        .filter((r) => r.count >= minOccurrences)
+        .sort((a, b) => b.count - a.count);
       proposals[v] = {
         correctionsLogged: d.total,
         byCategory: cats,
+        // Usually the more actionable of the two lists.
+        repeatedRationales: repeatedRationales.map((r) => ({
+          ...r,
+          proposedAs:
+            r.category === "SRC"
+              ? "Not a translation rule — the English needs fixing. Route to content design."
+              : r.category === "MEAN" || r.category === "VAR"
+                ? "Defect, not a style rule — check why it reached review."
+                : `${v}-voice-rules.md ${meta[r.category]?.routesTo || ""}: ${r.count} strings corrected for this reason`,
+        })),
         repeatedCorrections: repeated.map((p) => ({
           ...p,
           proposedAs:

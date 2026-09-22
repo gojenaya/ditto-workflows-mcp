@@ -5,6 +5,33 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0] - 2026-09-22
+
+Fixes found by running the whole pipeline — link pass, naming, variablisation,
+translation, review, rule proposal — end to end on a real 21-string Figma
+section before publishing.
+
+### Fixed
+- `propose_rules_from_reviews` only clustered corrections that shared the same
+  source string, so three different CTAs corrected for the same stated reason
+  produced no proposal at all. Rationale is now the primary grouping — "masdar
+  avoids assuming gender" applied across three strings is a rule about CTAs, not
+  about those three strings, and it is the more actionable of the two signals.
+- Developer-ID proposals named a string after a container that merely *holds* a
+  control: "Consent button group" wraps consent text and a button both, so the
+  legal text was being proposed as `consentgroup-cta`. Collective nouns (group,
+  wrapper, area, list, row, section) no longer match a role.
+- Figma component paths were used whole, producing truncated nonsense —
+  `top-navigation-large-content-n` from "Top navigation / Large content". Only
+  the family before the slash names a role, and IDs are now trimmed at a word
+  boundary rather than mid-word.
+- A role suffix no longer counts as copy-derived: `submit-request-cta` was being
+  rejected for containing its own copy, when the suffix is exactly what makes it
+  purposeful rather than a slug.
+- Component-family names (top-navigation, sheet, card, section-header, list-item)
+  joined the generic list — `top-navigation-nav-title` is redundant and says
+  nothing a screen name would not.
+
 ## [0.25.0] - 2026-09-22
 
 Developer IDs stop being the copy slugged. Ditto names a new item from its text,

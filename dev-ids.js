@@ -40,6 +40,11 @@ const GENERIC = new Set([
   "leading", "trailing", "slot", "wrapper", "box", "element", "component",
   "leading-label-text", "trailing-label-text", "supporting-text", "page-header",
   "instruction-text", "step-number", "letter", "number",
+  // Component-family names that locate a string in the chrome without saying
+  // what it is. "top-navigation-nav-title" is redundant and tells a developer
+  // nothing the screen name wouldn't.
+  "top-navigation", "navigation", "nav", "sheet", "modal", "dialog", "card",
+  "section-header", "list-item", "entered-text", "text-box",
 ]);
 
 export function isGenericName(name) {
@@ -52,7 +57,14 @@ export function isGenericName(name) {
 
 // Would this ID just be the copy again? That is what we are replacing, so an ID
 // derived from the text is rejected however it was produced.
+// Role suffixes that make an ID purposeful rather than a copy slug:
+// "submit-request-cta" says what the element IS, "submit-request" only repeats
+// what it says. Stripped before the copy comparison.
+const ROLE_TAIL = /-(cta|section-title|nav-title|tab|badge|tooltip|toast|placeholder|error|label|title|subtitle|note|hint|value|amount|link)$/;
+
 export function isCopyDerived(id, text) {
+  const withRole = ROLE_TAIL.test(kebab(id));
+  if (withRole) return false;
   const a = kebab(id);
   const b = kebab(text);
   if (!a || !b) return false;
@@ -69,6 +81,20 @@ export function isCopyDerived(id, text) {
 }
 
 const MAX_LEN = 30;
+
+// Never cut mid-word — "top-navigation-large-content-n" looks like a mistake.
+function trimToWords(raw) {
+  const k = kebab(raw);
+  if (k.length <= MAX_LEN) return k;
+  const parts = k.split("-");
+  let out = "";
+  for (const p of parts) {
+    if (!out) { out = p; continue; }
+    if ((out + "-" + p).length > MAX_LEN) break;
+    out += "-" + p;
+  }
+  return out;
+}
 
 // One gate in front of every write. Returns [] when the ID is acceptable.
 export function validateDevId(id, { text = "", taken = new Set() } = {}) {
@@ -87,6 +113,11 @@ export function validateDevId(id, { text = "", taken = new Set() } = {}) {
 
 // Deterministic naming for the cases where structure genuinely tells us the
 // answer. Anything this returns null for is the agent's to name.
+// A container whose name ends in a collective noun holds the control, it isn't
+// the control — "Consent button group" wraps consent TEXT and a button both, so
+// naming that text "…-cta" is simply wrong.
+const COLLECTIVE = /\b(group|wrapper|container|area|list|stack|row|section)\b\s*$/i;
+
 const ROLE_SUFFIX = [
   [/\bbutton\b|\bcta\b|\bbtn\b/i, "cta"],
   [/\bsection header\b|\bsectionheader\b/i, "section-title"],
@@ -113,17 +144,26 @@ export function proposeFromStructure(node, { componentNameByText } = {}) {
   // container so two buttons on one screen don't collide.
   const chain = [node.componentName, ...(node.ancestors || [])].filter(Boolean);
   for (const [re, suffix] of ROLE_SUFFIX) {
-    const hit = chain.find((c) => re.test(c));
+    const hit = chain.find((c) => re.test(c) && !COLLECTIVE.test(c));
     if (!hit) continue;
     // Strip the role word out of the container name to avoid "button-cta".
-    let base = kebab(hit).replace(/-?(button|cta|btn|section-header|tab|badge|chip|tooltip|toast)-?/g, "").replace(/^-|-$/g, "");
+    // Figma component paths are "Family / Variant" — only the family names the
+    // role; the variant is presentation.
+    let base = kebab(String(hit).split("/")[0])
+      .replace(/-?(button|cta|btn|section-header|tab|badge|chip|tooltip|toast)-?/g, "")
+      .replace(/^-|-$/g, "");
     // A container named for the button's VISUAL VARIANT tells us nothing about
     // purpose, and every screen has a primary one — "primary-cta" would collide
     // across the project and mean nothing when it did. Fall back to the copy.
     if (VARIANT_WORDS.test(base)) base = "";
-    const qualifier = base && !isGenericName(base) ? base : kebab(text).split("-").slice(0, 2).join("-");
-    const id = kebab(`${qualifier}-${suffix}`).slice(0, MAX_LEN);
-    if (id && !isGenericName(id) && !VARIANT_WORDS.test(id)) return { id, tier: "role", confidence: "medium" };
+    const qualifier = base && !isGenericName(base) ? base : kebab(text);
+    const id = trimToWords(`${qualifier}-${suffix}`);
+    // Only propose when the whole name survived: a truncated ID
+    // ("things-to-section-title" from "Things to know") reads as a typo, and the
+    // agent naming it from the digest will do better.
+    if (id && !isGenericName(id) && !VARIANT_WORDS.test(id) && id === kebab(`${qualifier}-${suffix}`)) {
+      return { id, tier: "role", confidence: "medium" };
+    }
   }
   return null;
 }

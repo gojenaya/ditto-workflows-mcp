@@ -37,6 +37,29 @@ Output a compact list: item id · the flagged text · the rule it breaks (name t
 
 ## Mode A — translator review sheet
 
+**Prefer the CSV pair (`export_review_csv` / `apply_review_csv`) over the Markdown one.** Translators
+work in Excel and Google Sheets; a Markdown table means hand-editing `\|` and `<br>` escapes in a text
+editor, which reviewers reasonably refuse to do. The CSV round-trip also *validates* on the way back —
+a translation that dropped or renamed a `{{placeholder}}` is rejected rather than written, and a row
+whose English changed while the sheet was out is rejected as stale instead of being attached to copy
+that no longer exists. The Markdown pair does neither.
+
+Three things worth doing with the CSV version:
+
+- **Scope it to a Figma page** (`figmaUrl` or `figmaPageId`). A page is 20-40 rows; a whole project can
+  be 400+, which nobody reviews properly. Page scoping needs a session token — it reads the Figma
+  linkage — and says so if it is missing rather than silently returning nothing.
+- **Omit `variantId` to get one file per variant.** Different languages go to different reviewers, and
+  a sheet mixing RTL with LTR is unreadable.
+- **Run `apply_review_csv` with `dryRun: true` first** on anything that isn't a sandbox, and read the
+  rejected rows before writing.
+
+Ask the reviewer to fill `reason_category` whenever they change something — it is a fixed code list
+(`export_review_csv(listReasons: true)`). Free text alone cannot be counted, and counting is what
+turns a recurring correction into a rule in the next step.
+
+### Mode A (Markdown, legacy)
+
 0. **Run the guardrail check first** (above) so the flags can be written into each row's Notes for the translator.
 1. `export_review_sheet(projectId, variantId?, statuses=['REVIEW'])` — writes a Markdown sheet (base · current translation · Verdict · editable Suggested · Notes) and returns its path + content. Pre-fill Notes with any guardrail flag for that row (rule + severity only, no suggested rewrite). Give the translator the path (or paste the sheet in chat).
 2. The translator edits each row: `approve` to keep, or `edit` + rewrite the Suggested cell; blank/`skip` to defer; Notes to flag. `{{variables}}` and placeholders stay intact.
@@ -62,6 +85,20 @@ Output a compact list: item id · the flagged text · the rule it breaks (name t
 8. Then do "Learn from corrections" below.
 
 ## Learn from corrections — feed rules back to the style guide
+
+**Start with `propose_rules_from_reviews(variantId?)`** when reviews came back through
+`apply_review_csv` — it reads the logged reason codes and reports which corrections *repeat*. Two
+signals, and the second matters more: the same string corrected the same way twice is a glossary row,
+while **several different strings corrected for the same stated reason is a voice rule** ("masdar
+avoids assuming gender", applied across three CTAs, is a rule about CTAs — not about those three
+strings).
+
+It proposes only; it never writes. One reviewer's preference must not silently become a workspace
+rule. Take the proposals to the language owner, then apply them by editing
+`translation-assets/{variant}-glossary.md` or `-voice-rules.md`, or via `add_style_guide_rules` for a
+workspace-wide rule. Categories `MEAN` (meaning changed) and `VAR` (placeholder broken) are defects
+rather than style preferences and never produce a rule — if they recur, ask why they reached review.
+
 
 Every reviewer edit is a signal: Claude's translation was wrong in a way a human fixed. Turn the *generalizable* ones into durable rules so the mistake isn't repeated. A correction is a `{from: what Claude/the old copy said, to: what the reviewer approved}` pair — from the edited review-sheet rows (Mode A) or the in-chat edits (Mode B).
 

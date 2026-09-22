@@ -5,6 +5,31 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-09-22
+
+Skill guidance, no code change.
+
+### Changed
+- **`/ditto-handoff` never exports a review sheet.** It has no review stage — it
+  writes FINAL — so producing a sheet implies a gate that isn't there and leaves
+  a file nobody asked for. Reviews belong to `/ditto-review`. The handoff exports
+  one only on an explicit request.
+- **Parallelism is now spelled out in `/ditto-handoff`.** The pipeline has a hard
+  spine (link → rename → variablise → translate → FINAL) whose writes are
+  strictly ordered — variablisation needs post-rename IDs, and merging duplicates
+  before translating is what avoids paying to translate one string five times.
+  What parallelises is the *deciding*: naming per screen, naming alongside
+  variablisation detection, one translation subagent per variant, and the audit's
+  four independent checks. Subagents return compact summaries and the
+  orchestrator does the writing, so parallel writers never race on dev-ID
+  uniqueness.
+- `/ditto-handoff` step 2 now starts from `propose_developer_ids` and records
+  decisions with `remember_developer_ids`.
+- `/ditto-review` prefers the CSV round-trip over the Markdown one, with the
+  reasons why (spreadsheet-native, and it validates placeholders and staleness on
+  the way back in), and points the feedback loop at
+  `propose_rules_from_reviews`.
+
 ## [0.26.0] - 2026-09-22
 
 Fixes found by running the whole pipeline — link pass, naming, variablisation,

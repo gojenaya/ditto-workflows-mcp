@@ -25,6 +25,32 @@ Only skip translation if all three are empty, or the user explicitly says not to
 
 ## Procedure (run straight through)
 
+### What can run in parallel
+
+The pipeline has one hard spine — **link → rename → variablise → translate → FINAL** — and each of those
+writes depends on the one before it. Parallelising *across* that spine corrupts the run: variablisation
+uses post-rename IDs, and merging duplicates before translating is what stops you paying to translate
+the same string five times.
+
+What genuinely parallelises is the **thinking**, not the writing. Fan these out in a single message;
+none of them reads another's output:
+
+| Run in parallel | Why it is safe |
+|---|---|
+| **Naming decisions, one subagent per screen** (step 2) | Each frame's strings are named from that frame's own context. A 100-string section is 5 screens' worth of independent judgement. |
+| **Naming vs variablisation detection** (steps 2 and 3) | Renaming changes IDs, variablisation changes text. Both read the same post-link state, so decide both at once — then **apply them in order**, rename first. |
+| **One translation subagent per variant** (step 4) | Arabic has no bearing on Hindi. This is the biggest single win and is already the documented pattern. |
+| **The audit's four checks** (step 6) | Instances persisted, dev IDs, leftover hardcoded values, empty variants — four independent reads. |
+
+Two rules when you fan out:
+
+- **Each subagent returns a compact summary, never its working.** A naming agent returns
+  `{from, to}` pairs; a translation agent returns `{variantId, wrote, skipped}`. Loading their
+  intermediate lists into this context is what the fan-out exists to avoid.
+- **Apply writes from the orchestrator, not from the subagents.** Parallel writers race on the same
+  project and the dev-ID uniqueness check stops being meaningful. Gather decisions in parallel, write
+  sequentially.
+
 1. **Link-pass:** call `figma_link_pass(projectId, figmaUrl)`.
    - Missing/expired session token → tell the user a browser window is opening, call `login_to_ditto`, retry.
    - Missing `FIGMA_API_KEY` → relay the setup instructions and stop (genuine blocker).
@@ -33,6 +59,9 @@ Only skip translation if all three are empty, or the user explicitly says not to
      - Workaround (as used in the SNPL branch case): re-run the `connect` for just the floating items with the **correct resolved page** (`GET /v1/files/{key}?ids={node}&depth=2` → the one CANVAS that comes back with children is the real page), then re-verify `figmaV2.instances` persisted. Only continue once `floating` is 0.
      - If it still won't link after the workaround, stop and report it — shipping floating copy to FINAL is worse than pausing.
 2. **Rename dev IDs — apply automatically, across BOTH result lists.** Go through `created` **and** `connectedToExisting` (both come back with dev IDs + screen names), decide semantic IDs, and apply them directly via `rename_developer_id(projectId, renames)` — one call, no approval step.
+   - **Start with `propose_developer_ids(figmaUrl, projectId)`.** It resolves what the design already answers — component-library strings and unambiguous UI roles — and hands back the rest as a compact digest (one line per string with font size, weight and container, in reading order). Name those from the digest; it carries the hierarchy a flat list of strings loses, at a fraction of the tokens of a screenshot. It also returns IDs it has seen before, so a re-run does not rename anything.
+   - `rename_developer_id` **rejects** copy-derived and generic targets — including Ditto's own slug-plus-counter (`abc-1`, `home-2`, `okay-3`), which reads as a deliberate name but is just the copy again. A rejection comes back with the reason; fix the name rather than passing `allowAnyId`.
+   - After the renames land, call `remember_developer_ids(figmaUrl, decisions)`. Without it the next run on the same frame proposes fresh names and churns IDs under engineers who already reference them.
    - **Do not skip the connected-to-existing items.** They keep whatever IDs earlier passes gave them, so junk like `1000000`, `000002798236526`, `annie`, `okay-3`, `home-2` survives run after run and never gets cleaned unless this step covers them. Expect to rename far more existing items than created ones.
    - Rename content-derived IDs (`15-june-2025`, `000002798236526`), truncated ones (`set-up-auto-debit-for-automati`), trailing-punctuation ones (`recent-beneficiaries-`), mismatches, and meaningless numbered duplicates (`home-2`, `okay-3`, `add-5`). Keep already-semantic IDs and short standard labels (`learn-more`).
    - Group repeated UI roles under a shared prefix so the project reads well: `nav-home` / `nav-calls` / `nav-chats`, `debit-card-option-1` / `-2`.
@@ -63,6 +92,11 @@ Only skip translation if all three are empty, or the user explicitly says not to
 - **Components: linked automatically, never edited.** `figma_link_pass` links matching texts to their library component — that *applies* the design system and changes nothing about the component. But a linked item is then component-governed, and every write tool will refuse it: base text, variables, translations, status, dev-ID rename, merging. **Expect the rest of the handoff to skip those items, and report the skips as correct behaviour, not failures.** This holds whatever the translation's state — including when it is *missing*: do not fill in a component's absent translation, because that copy would land in every project using it. Refusals arrive as `componentLinkedSkipped`. If a component genuinely needs new or corrected copy, name it in your final report for the design-system owner to change in the Ditto web app. Reading components (`list_components`, `search_text`) is encouraged — that is how you avoid duplicating copy that already exists.
 - **A configured default variant is an instruction, not a hint.** Translate into it without being asked and without confirming the language. The only reasons to skip are an explicit "don't translate" or `defaultVariantExists: false`.
 - **Autonomous by default — don't stop for approvals.** Stop only for real blockers (auth, ambiguous project). If the user explicitly says they want to review as you go, switch to presenting each step for approval instead.
+- **Never export a review sheet as part of this flow.** `export_review_csv` / `export_review_sheet` are
+  for when a human translator is going to check the work, which is a different job with a different
+  skill (`/ditto-review`). Running it here produces a file nobody asked for and implies a review step
+  this flow does not have. Export one **only** if the user asks for it in so many words — "give me a
+  sheet for the translator", "I want to review the Arabic" — and then say that you have, and where.
 - **This flow sets FINAL directly — there is no review gate.** Since FINAL is where copy ships, be conservative: skip the ambiguous and flag it in the report rather than committing a guess. Use the review-process variant of this skill when a human must sign off first.
 - Renames and variablisation are reversible (rename again; re-edit text).
 - The link-pass is idempotent-ish (re-running connects rather than duplicates) — don't silently re-run it to "fix" things.

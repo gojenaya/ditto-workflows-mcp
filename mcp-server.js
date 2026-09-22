@@ -26,8 +26,6 @@ import {
   newObjectId, toRichText, TOKEN_HELP,
   listStyleGuides, listStyleGuideRules, addStyleGuideRules,
   fetchVariables,
-  toRichTextWithVariables,
-  updateTextItemsRich,
   deriveVariableExamples,
 } from "./ditto-backend.js";
 import { parseFigmaUrl, getFigmaTextNodes, isPlaceholder, normalizeText, FIGMA_KEY_HELP } from "./figma-api.js";
@@ -778,7 +776,12 @@ server.registerTool(
     title: "Write variant translations",
     description:
       "Write translated variants back to Ditto (public API). Each translation is {id, text} where id is the base " +
-      "item's developer ID. Creates the variant if missing. Defaults: configured default variant, status 'WIP'.",
+      "item's developer ID. Creates the variant if missing. Defaults: configured default variant, status 'WIP'. " +
+      "Keep every {{placeholder}} from the base text verbatim — they are LINKED to real workspace variables as " +
+      "part of this write (not left as literal characters), so the variant tracks its variables exactly like the " +
+      "base item does. Placeholders with no matching workspace variable can't be linked and are reported under " +
+      "`unlinkedPlaceholders` — that almost always means the BASE item was never variablised, so fix it there " +
+      "with link_variables first.",
     inputSchema: {
       translations: z
         .array(z.object({ id: z.string(), text: z.string() }))
@@ -798,15 +801,49 @@ server.registerTool(
     const { allowed, withheld } = withheldForComponents(translations.map((t) => t.id), guard);
     const allow = new Set(allowed);
     const writable = translations.filter((t) => allow.has(t.id));
+    // A {{placeholder}} written as plain characters is NOT a linked variable —
+    // it is an untracked string that merely looks right. Ditto then can't warn
+    // when a translation drops, reorders or mistypes one, and the example value
+    // never renders. Variants carry their own rich_text and `variables`, so the
+    // fix is the same one base items get: pass the variable NAMES and let the
+    // API build the variable node. (Verified 16 Sep 2026 — a variant written
+    // this way is indistinguishable from one edited by hand in the web app.)
+    // Names are filtered against the workspace list first: an unknown name is
+    // rejected with 400 "Variable name not found", which would fail the whole
+    // batch rather than that one placeholder.
+    const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
+    // Non-global copy on purpose: `.test()` on a /g regex advances lastIndex
+    // between calls, so a shared one would skip matches inside `.some()`.
+    const HAS_PLACEHOLDER = /\{\{\s*[A-Za-z0-9_]+\s*\}\}/;
+    const anyPlaceholders = writable.some((t) => HAS_PLACEHOLDER.test(t.text));
+    const known = anyPlaceholders ? new Set((await fetchVariables()).map((v) => v.name)) : new Set();
+    const unlinkable = new Set();
+    const namesIn = (text) => {
+      const names = [];
+      for (const m of text.matchAll(PLACEHOLDER)) {
+        if (known.has(m[1])) {
+          if (!names.includes(m[1])) names.push(m[1]);
+        } else {
+          unlinkable.add(m[1]);
+        }
+      }
+      return names;
+    };
+    let linkedCount = 0;
     if (writable.length) {
       await dittoPatch({
         variantId,
         forceVariantCreation: true,
-        updates: writable.map((t) => ({
-          developerId: t.id,
-          text: t.text,
-          status,
-        })),
+        updates: writable.map((t) => {
+          const variables = namesIn(t.text);
+          linkedCount += variables.length;
+          return {
+            developerId: t.id,
+            text: t.text,
+            status,
+            variables,
+          };
+        }),
       });
     }
     return {
@@ -818,6 +855,16 @@ server.registerTool(
               wrote: writable.length,
               variantId,
               status,
+              variablesLinked: linkedCount,
+              ...(unlinkable.size
+                ? {
+                    unlinkedPlaceholders: [...unlinkable],
+                    unlinkedPlaceholdersNote:
+                      "No workspace variable has these names, so they stayed as literal text in the " +
+                      "translation. Usually the base item's placeholder was never linked either — fix " +
+                      "it there with link_variables, then re-run this translation.",
+                  }
+                : {}),
               ...componentGuardReport(withheld, guard),
             },
             null,
@@ -2164,14 +2211,15 @@ server.registerTool(
 server.registerTool(
   "link_variables",
   {
-    title: "Variablise text and LINK the variables (unofficial)",
+    title: "Variablise text and LINK the variables",
     description:
       "Rewrite text items to use {{variable}} placeholders AND actually link them to workspace variables — " +
-      "the thing update_text cannot do. Missing variables are created first (public API) unless createMissing " +
-      "is false. UNOFFICIAL for the linking half: a linked variable is a NODE inside the item's rich_text, and " +
-      "the public API's variableIds field is derived from it, so PATCH /v2/textItems silently ignores any " +
-      "variableIds/variables you send (verified 24 Aug 2026). This writes the rich-text node via the web app's " +
-      "internal API, so it needs a session token (login_to_ditto), not just the API key. " +
+      "the thing update_text cannot do (it writes {{name}} as literal characters, so the item looks " +
+      "variablised with no variable behind it). Missing variables are created first unless createMissing is " +
+      "false. Public API only — no session token needed: PATCH /v2/textItems accepts `variables` as an array " +
+      "of variable NAMES and builds the rich-text variable node from them. (An earlier note here claimed this " +
+      "was impossible and forced a backend write; that test passed `variableIds`, and `variables` as objects — " +
+      "both are ignored. Names as plain strings work. Verified 16 Sep 2026.) " +
       "Placeholder names must match /^[A-Za-z0-9_]+$/ — snake_case, no hyphens. " +
       "Unknown placeholders are left as literal text and reported under `unresolved`.",
     inputSchema: {
@@ -2206,24 +2254,17 @@ server.registerTool(
     },
   },
   async ({ projectId, updates, createMissing = true, examples = {} }) => {
-    const mongoProjectId = await projectMongoIdByDevId(projectId);
-    const dump = await fetchWorkspaceDump();
-
-    const idMap = new Map();
-    const oldTextById = new Map();
+    // Public API throughout. The write used to go through the web app's internal
+    // API purely because linking was believed impossible here; it isn't, so the
+    // session-token dependency is gone. The component guard is the only piece
+    // that still prefers the backend, and it already falls back on its own.
+    const guard = await componentProtectedIds(projectId);
     // Component-governed items are excluded outright: variablising one would
     // rewrite the design system's shared string.
-    const componentLinked = new Set();
-    for (const it of dump) {
-      if (it.doc_ID === mongoProjectId && it.developerId) {
-        if (it.ws_comp) {
-          componentLinked.add(it.developerId);
-          continue;
-        }
-        idMap.set(it.developerId, it._id);
-        oldTextById.set(it.developerId, it.text ?? "");
-      }
-    }
+    const componentLinked = guard.ids;
+    const baseItems = await fetchBaseItems(projectId);
+    const knownIds = new Set(baseItems.map((i) => i.id));
+    const oldTextById = new Map(baseItems.map((i) => [i.id, i.text ?? ""]));
     const componentWithheld = updates.filter((u) => componentLinked.has(u.id)).map((u) => u.id);
     updates = updates.filter((u) => !componentLinked.has(u.id));
     if (!updates.length) {
@@ -2231,7 +2272,7 @@ server.registerTool(
         content: [{
           type: "text",
           text: JSON.stringify(
-            { projectId, counts: { updated: 0 }, ...componentGuardReport(componentWithheld, { ids: componentLinked, precise: true }) },
+            { projectId, counts: { updated: 0 }, ...componentGuardReport(componentWithheld, guard) },
             null,
             2,
           ),
@@ -2284,17 +2325,26 @@ server.registerTool(
     const unresolvedAll = new Set();
     const malformedAll = new Set();
     for (const u of updates) {
-      const itemId = idMap.get(u.id);
-      if (!itemId) {
+      if (!knownIds.has(u.id)) {
         results.push({ id: u.id, status: "skipped", reason: "no item with this developer ID in the project" });
         continue;
       }
-      const { richText, unresolved, malformed } = toRichTextWithVariables(u.text, byName);
+      // {{...}} that can never be a variable (hyphens, dots, spaces) stays as
+      // literal text — surfacing it is how unlinked placeholders stopped
+      // slipping into the workspace unnoticed.
+      const malformed = [...u.text.matchAll(/\{\{([^}]*)\}\}/g)]
+        .map((m) => m[1].trim())
+        .filter((n) => !/^[A-Za-z0-9_]+$/.test(n));
+      const wantedHere = [...new Set([...u.text.matchAll(PLACEHOLDER)].map((m) => m[1]))];
+      const names = wantedHere.filter((n) => byName.has(n));
+      // A name the workspace doesn't know is rejected with 400 "Variable name
+      // not found", so it is left out of the call rather than failing the item.
+      const unresolved = wantedHere.filter((n) => !byName.has(n));
       unresolved.forEach((n) => unresolvedAll.add(n));
       malformed.forEach((n) => malformedAll.add(n));
       try {
-        await updateTextItemsRich(mongoProjectId, [{ textItemIds: [itemId], text: u.text, richText }]);
-        const linked = (richText.content[0].content || []).filter((n) => n.type === "variable").length;
+        await dittoPatch({ updates: [{ developerId: u.id, text: u.text, variables: names }] });
+        const linked = names.length;
         results.push({
           id: u.id,
           status: "updated",
@@ -2324,7 +2374,7 @@ server.registerTool(
             {
               projectId,
               counts,
-              ...componentGuardReport(componentWithheld, { ids: componentLinked, precise: true }),
+              ...componentGuardReport(componentWithheld, guard),
               variablesCreated: created,
               ...(createdWithoutExample.length
                 ? {

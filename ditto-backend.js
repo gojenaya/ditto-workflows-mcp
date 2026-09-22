@@ -233,7 +233,22 @@ export function toRichTextWithVariables(text, varsByName) {
 //   { updates: [ { textItemIds: [...], text, richText } ] }
 // NB the schema requires `textItemIds` (array) — `_id` or `textItemId` are
 // rejected with a zod error naming the right field.
+// DANGER, and the reason for the guard below: this endpoint SILENTLY IGNORES a
+// `variantId` and writes the BASE item instead. Sending an Arabic string with
+// variantId:"ar" does not translate the item — it overwrites the English base
+// with Arabic, returns 200, and reports success. (Observed 16 Sep 2026 on
+// naya2/auto-invest-frequency.) Variants are written through the PUBLIC API,
+// which takes `variantId` at the top level and `variables` as an array of
+// names — see write_translations. Nothing here may target a variant.
 export async function updateTextItemsRich(projectMongoId, updates) {
+  for (const u of updates) {
+    if (u && "variantId" in u) {
+      throw new Error(
+        "updateTextItemsRich cannot target a variant: this backend endpoint ignores variantId and " +
+          "overwrites the BASE item instead. Use the public API (write_translations) for variant writes.",
+      );
+    }
+  }
   return backendFetch(`/ditto-project/${projectMongoId}/text-items`, {
     method: "PATCH",
     body: JSON.stringify({ updates }),

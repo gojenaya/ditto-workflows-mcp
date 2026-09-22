@@ -5,6 +5,42 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-09-22
+
+Placeholders in a translated variant were never actually linked — they were
+literal `{{name}}` characters. Ditto could not track them, could not warn when a
+translation dropped or mistyped one, and never rendered the example value. The
+variant looked correct and carried an untracked string, which is the same silent
+failure `update_text` used to cause on base items.
+
+The fix turned out to be simpler than the workaround it replaces. The public API
+accepts `variables` as an array of variable **names**, and builds the rich-text
+variable node from them. An earlier note in this repo claimed this was impossible
+and forced a write through the web app's internal API; that test passed
+`variableIds`, and `variables` as objects — both are ignored. Names as plain
+strings work, on variants and on base items alike.
+
+### Added
+- `write_translations` links every `{{placeholder}}` it writes, so a variant
+  tracks its variables exactly like the base item does. Names are checked against
+  the workspace first — an unknown name is rejected by the API with a 400 that
+  would otherwise fail the whole batch — and anything unlinkable is reported as
+  `unlinkedPlaceholders`, which almost always means the base item was never
+  variablised.
+
+### Changed
+- `link_variables` now uses the public API and **no longer needs a session
+  token**. The backend rich-text write and its `login_to_ditto` dependency are
+  gone from this path.
+
+### Fixed
+- `updateTextItemsRich` throws if handed a `variantId`. That backend endpoint
+  silently ignores the field and writes the **base** item instead: sending Arabic
+  with `variantId: "ar"` overwrote the English source, returned 200, and reported
+  success. Observed on a live item before the guard existed.
+- `link_variables` reported `precise: true` on its component guard even when the
+  guard had fallen back to the public-API approximation.
+
 ## [0.22.0] - 2026-08-27
 
 Corrects 0.21.0, which drew the line in the wrong place. Auto-linking to

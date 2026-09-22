@@ -5,6 +5,41 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.24.0] - 2026-09-22
+
+Translator review moves to CSV. The Markdown sheets were readable in chat but not
+in the tool translators actually use — a reviewer working in Excel or Sheets had
+to hand-edit `\|` and `<br>` escapes in a text editor, and mostly didn't.
+
+The bigger change is that the round-trip now validates. A sheet that comes back
+with a dropped, renamed or duplicated `{{placeholder}}` is rejected instead of
+written, and a row whose English changed while the sheet was out for review is
+rejected as stale rather than attached to copy that no longer exists. Neither
+check existed before; the old sheet simply asked reviewers to be careful.
+
+### Added
+- `export_review_csv` — scope to a Figma page (`figmaUrl`/`figmaPageId`), a
+  block, or the whole project. A page-sized sheet is 20-40 rows; the SNPL
+  Markdown export was 468, which nobody reviews. Omitting `variantId` writes one
+  file per variant, since different languages go to different reviewers and
+  mixing RTL with LTR in one sheet is unreadable. Carries screen context and a
+  fixed `reason_category` vocabulary.
+- `apply_review_csv` — validates placeholders and staleness before writing,
+  links placeholders as real variables on write, joins on `dev_id` so reviewers
+  may sort/filter/delete freely, and supports `dryRun`.
+- `propose_rules_from_reviews` — counts which corrections REPEAT and routes each
+  to the glossary, a voice-rules section, or back to content design. Proposes
+  only: one reviewer's preference must not silently become a workspace rule.
+
+### Notes
+- CSV handling covers the failure modes that are silent rather than loud: a
+  UTF-8 BOM (without it Excel renders Arabic, Hindi and Urdu as mojibake), a
+  formula guard on cells starting `=`/`+`/`-`/`@`, and delimiter sniffing for the
+  European locales where Excel writes semicolons.
+- Page scoping reads the Figma linkage through the unofficial backend, so it
+  needs a session token and fails with that message rather than silently
+  reporting zero rows.
+
 ## [0.23.0] - 2026-09-22
 
 Placeholders in a translated variant were never actually linked — they were

@@ -29,6 +29,7 @@ import {
   deriveVariableExamples,
 } from "./ditto-backend.js";
 import { parseFigmaUrl, getFigmaTextNodes, isPlaceholder, normalizeText, FIGMA_KEY_HELP } from "./figma-api.js";
+import { toCsv, fromCsv, hashText, placeholdersOf, placeholderDiff, REASON_CATEGORIES, REASON_CODES } from "./review-csv.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Glossary/TM files: an explicit env override, else a translation-assets/ dir
@@ -1180,6 +1181,39 @@ server.registerTool(
 // their calls back (edits FINAL, approvals FINAL, flagged/blank left in REVIEW).
 
 const REVIEW_DIR = path.join(DATA_DIR, "review-sheets");
+// Applied reviews accumulate here so propose_rules_from_reviews can count what
+// reviewers actually keep correcting, rather than asking them to summarise it.
+const REVIEW_LOG = path.join(DATA_DIR, "review-log.jsonl");
+
+// Map dev ID -> {screen, page} from the backend's Figma linkage. Screen context
+// is the single biggest quality lever in a review sheet: a translator who can
+// see the string sits on "Overdue" renders it differently from one staring at a
+// bare word. Best-effort — a project with no Figma linkage still exports fine.
+async function figmaContextByDevId(projectId) {
+  const out = new Map();
+  out.unavailable = null;
+  try {
+    const mongoId = await projectMongoIdByDevId(projectId);
+    const dump = await fetchWorkspaceDump();
+    for (const it of dump) {
+      if (it.doc_ID !== mongoId || !it.developerId) continue;
+      const inst = (((it.integrations || {}).figmaV2 || {}).instances) || [];
+      if (!inst.length) continue;
+      out.set(it.developerId, {
+        pageId: inst[0].figmaPageId || null,
+        frameId: inst[0].figmaTopLevelFrameId || null,
+        pages: [...new Set(inst.map((x) => x.figmaPageId).filter(Boolean))],
+      });
+    }
+  } catch (err) {
+    // Distinguish "this project has no Figma linkage" from "we could not read
+    // the linkage at all" — silently reporting 0 rows for an expired token sends
+    // the user hunting for a data problem that does not exist.
+    out.unavailable = err.message;
+  }
+  return out;
+}
+
 const unescCell = (s) =>
   s.replace(/<br>/g, "\n").replace(/\\\|/g, "|").replace(/\\\\/g, "\\").trim();
 // Split a table row on unescaped pipes, dropping the outer borders.
@@ -1187,6 +1221,382 @@ function splitRow(line) {
   const inner = line.trim().replace(/^\|/, "").replace(/\|$/, "");
   return inner.split(/(?<!\\)\|/).map(unescCell);
 }
+
+server.registerTool(
+  "export_review_csv",
+  {
+    title: "Export a translator review sheet (CSV)",
+    description:
+      "Write a CSV review sheet for a human translator — the spreadsheet-native successor to " +
+      "export_review_sheet, which produced Markdown a reviewer could not open in Excel or Sheets. " +
+      "Scope it to a Figma page (figmaUrl or figmaPageId) for a screen-sized review, or to the whole " +
+      "project. Omit variantId to export EVERY variant that has translations, one file each — different " +
+      "languages go to different reviewers, and mixing RTL with LTR in one sheet is unreadable. " +
+      "The reviewer fills in `suggested`, `verdict` (A/N), `reason_category` (a fixed code — run with " +
+      "listReasons:true to see them) and optional `reason_detail`. The categories are what let " +
+      "propose_rules_from_reviews later count which corrections repeat; free text alone never clusters. " +
+      "Columns the reviewer must not edit (dev_id, base_hash) carry the identity and staleness check. " +
+      "Feed the edited file back with apply_review_csv.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID"),
+      variantId: z.string().optional().describe("Variant to review. Omit to export every variant that has translations, one file each."),
+      figmaUrl: z.string().optional().describe("Figma link — scopes the sheet to that page's items only"),
+      figmaPageId: z.string().optional().describe("Figma page id (e.g. '24660:110522') — alternative to figmaUrl"),
+      blockName: z.string().optional().describe("Limit to one Ditto block"),
+      statuses: z.array(z.enum(["NONE", "WIP", "REVIEW", "FINAL"])).default(["REVIEW"])
+        .describe("Variant statuses to include (default: REVIEW)"),
+      listReasons: z.boolean().optional().describe("Return the reason-category vocabulary and write nothing"),
+    },
+  },
+  async ({ projectId, variantId, figmaUrl, figmaPageId, blockName, statuses, listReasons }) => {
+    if (listReasons) {
+      return { content: [{ type: "text", text: JSON.stringify({ reasonCategories: REASON_CATEGORIES }, null, 2) }] };
+    }
+
+    // Resolve the page scope first so a bad link fails before any export work.
+    let pageId = figmaPageId || null;
+    if (!pageId && figmaUrl) {
+      const { fileKey, nodeId } = parseFigmaUrl(figmaUrl);
+      const nodes = await getFigmaTextNodes(fileKey, nodeId);
+      pageId = nodes[0]?.pageId || null;
+      if (!pageId) {
+        return { content: [{ type: "text", text: `Could not resolve a Figma page from that link (no text nodes under ${nodeId}).` }], isError: true };
+      }
+    }
+
+    // A projects-only filter returns BASE rows only — variant rows have to be
+    // asked for by name, so resolve the variant list first.
+    const wanted = variantId
+      ? [variantId]
+      : (await dittoFetch("/variants")).map((v) => v.id);
+    const all = await dittoFetch(`/textItems?filter=${encodeURIComponent(JSON.stringify({
+      projects: [{ id: projectId }],
+      variants: [...wanted.map((id) => ({ id })), { id: "base" }],
+    }))}`);
+    const base = new Map();
+    for (const i of all) if (i.variantId === null && i.pluralForm === null) base.set(i.id, i);
+
+    // Keep only variants this project actually has translations for, so an
+    // empty file is never written for a variant nobody has touched.
+    const variants = wanted.filter((v) => all.some((i) => i.variantId === v && i.pluralForm === null));
+    if (!variants.length) {
+      return { content: [{ type: "text", text: `No variants with translations in '${projectId}'.` }] };
+    }
+
+    const figma = pageId ? await figmaContextByDevId(projectId) : new Map();
+    if (pageId && figma.unavailable) {
+      return { content: [{ type: "text", text:
+        "Page scoping needs the Figma linkage, which is read through the unofficial backend — and that " +
+        `read failed: ${figma.unavailable}\n\n` +
+        "Run login_to_ditto, or export without figmaUrl/figmaPageId to review the whole project." }], isError: true };
+    }
+    const guard = await componentProtectedIds(projectId);
+
+    fs.mkdirSync(REVIEW_DIR, { recursive: true });
+    const written = [];
+    for (const v of variants) {
+      const rows = [];
+      let skippedOffPage = 0;
+      for (const i of all) {
+        if (i.variantId !== v || i.pluralForm !== null) continue;
+        if (!statuses.includes(i.status)) continue;
+        const b = base.get(i.id);
+        if (!b) continue;
+        // A component's translations belong to its owner, not to this reviewer.
+        if (guard.ids.has(i.id)) continue;
+        if (blockName && (b.blockName || "") !== blockName) continue;
+        if (pageId) {
+          const ctx = figma.get(i.id);
+          if (!ctx || !ctx.pages.includes(pageId)) { skippedOffPage++; continue; }
+        }
+        rows.push([
+          i.id,
+          (figma.get(i.id) || {}).frameId || "",
+          b.text,
+          i.text,
+          i.text,          // suggested — pre-filled so an unchanged cell means "no edit"
+          "",              // verdict
+          "",              // reason_category
+          "",              // reason_detail
+          hashText(b.text),
+        ]);
+      }
+      const headers = ["dev_id", "screen", "base_en", `current_${v}`, `suggested_${v}`, "verdict", "reason_category", "reason_detail", "base_hash"];
+      const file = path.join(REVIEW_DIR, `${projectId}-${v}${pageId ? "-" + pageId.replace(/[:]/g, "_") : ""}.csv`);
+      fs.writeFileSync(file, toCsv(headers, rows));
+      written.push({ variantId: v, rows: rows.length, path: file, ...(skippedOffPage ? { skippedOffPage } : {}) });
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          projectId,
+          scope: pageId ? { figmaPageId: pageId } : (blockName ? { blockName } : "whole project"),
+          statuses,
+          files: written,
+          reasonCategories: REASON_CODES,
+          howToReview:
+            "Edit `suggested` to fix a translation. Set `verdict` to A (approve) or N (rejected). " +
+            "Put a code from reasonCategories in `reason_category` whenever you change something, and " +
+            "the why in `reason_detail`. Keep every {{placeholder}} exactly as it appears in base_en — " +
+            "reordering is fine, renaming or dropping is not. Do not edit dev_id or base_hash. " +
+            "Rows may be sorted or filtered freely.",
+          ...(pageId && !written.some((w) => w.rows) ? {
+            warning:
+              "0 rows matched that Figma page. Only items with a Figma linkage can be page-scoped " +
+              "(about a third of the workspace) — re-run without figmaUrl/figmaPageId to review the whole project.",
+          } : {}),
+          ...componentGuardReport([...guard.ids].filter((id) => base.has(id)), guard),
+        }, null, 2),
+      }],
+    };
+  },
+);
+
+server.registerTool(
+  "apply_review_csv",
+  {
+    title: "Apply a translator review sheet (CSV)",
+    description:
+      "Read a CSV edited by a reviewer (from export_review_csv) and push the verdicts to Ditto. Rows " +
+      "whose `suggested` changed are written as that variant; rows marked A with no edit are promoted " +
+      "as-is; blank rows are left alone. Unlike the Markdown round-trip this VALIDATES before writing: a " +
+      "translation whose {{placeholders}} do not match the source is rejected (a dropped or renamed token " +
+      "breaks at runtime), and a row whose source English changed since export is rejected as stale rather " +
+      "than attached to copy that no longer exists. Placeholders are linked as real variables on write. " +
+      "Rows are joined on dev_id, so a reviewer may sort, filter or delete freely. Reason codes are logged " +
+      "for propose_rules_from_reviews. Pass dryRun to see what would happen without writing.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID"),
+      variantId: z.string().optional().describe("Variant being applied (default: configured default variant)"),
+      path: z.string().optional().describe("Path to the edited CSV (default: the exported location)"),
+      status: z.enum(["NONE", "WIP", "REVIEW", "FINAL"]).default("FINAL")
+        .describe("Status to write approved/edited rows at (default FINAL)"),
+      dryRun: z.boolean().optional().describe("Validate and report without writing to Ditto"),
+    },
+  },
+  async ({ projectId, variantId, path: filePath, status, dryRun }) => {
+    variantId = requireVariant(variantId);
+    const file = filePath || path.join(REVIEW_DIR, `${projectId}-${variantId}.csv`);
+    let raw;
+    try { raw = fs.readFileSync(file, "utf8"); }
+    catch {
+      const near = fs.existsSync(REVIEW_DIR)
+        ? fs.readdirSync(REVIEW_DIR).filter((f) => f.startsWith(`${projectId}-${variantId}`) && f.endsWith(".csv"))
+        : [];
+      return { content: [{ type: "text", text:
+        `No CSV at ${file}.` + (near.length ? ` Did you mean: ${near.join(", ")}` : " Run export_review_csv first.") }], isError: true };
+    }
+    const rows = fromCsv(raw);
+    if (!rows.length) return { content: [{ type: "text", text: `${file} has no data rows.` }], isError: true };
+
+    const curCol = `current_${variantId}`, sugCol = `suggested_${variantId}`;
+    if (!(sugCol in rows[0])) {
+      const cols = Object.keys(rows[0]).join(", ");
+      return { content: [{ type: "text", text:
+        `That sheet has no '${sugCol}' column (found: ${cols}). It is probably for a different variant.` }], isError: true };
+    }
+
+    // Current base text — for the staleness check, and to validate placeholders
+    // against the source rather than against whatever the sheet claims.
+    const live = await dittoFetch(`/textItems?filter=${encodeURIComponent(JSON.stringify({
+      projects: [{ id: projectId }], variants: [{ id: "base" }],
+    }))}`);
+    const base = new Map();
+    for (const i of live) if (i.variantId === null && i.pluralForm === null) base.set(i.id, i.text);
+
+    const edits = [], approvals = [], rejected = [], deferred = [], reasons = [];
+    for (const r of rows) {
+      const id = (r.dev_id || "").trim();
+      if (!id) continue;
+      const suggested = r[sugCol] ?? "";
+      const current = r[curCol] ?? "";
+      const verdict = (r.verdict || "").trim().toLowerCase();
+      const changed = suggested.trim() !== "" && suggested !== current;
+      const approve = ["a", "approve", "y", "yes"].includes(verdict);
+
+      if (!changed && !approve) { deferred.push(id); continue; }
+
+      const liveBase = base.get(id);
+      if (liveBase === undefined) { rejected.push({ id, why: "no such item in this project" }); continue; }
+
+      // Staleness: the English moved while the sheet was out for review.
+      if (r.base_hash && hashText(liveBase) !== r.base_hash.trim()) {
+        rejected.push({ id, why: "source English changed since export — re-export and re-review this row", nowReads: liveBase.slice(0, 60) });
+        continue;
+      }
+      if (changed) {
+        const d = placeholderDiff(liveBase, suggested);
+        if (d.missing.length || d.added.length) {
+          rejected.push({
+            id,
+            why: "placeholders do not match the source",
+            ...(d.missing.length ? { dropped: d.missing } : {}),
+            ...(d.added.length ? { unknown: d.added } : {}),
+          });
+          continue;
+        }
+      }
+
+      if (r.reason_category || r.reason_detail) {
+        reasons.push({
+          id,
+          category: (r.reason_category || "").trim().toUpperCase() || "OTHER",
+          detail: (r.reason_detail || "").trim(),
+          base: liveBase,
+          from: current,
+          to: changed ? suggested : current,
+        });
+      }
+      if (changed) edits.push({ id, text: suggested }); else approvals.push(id);
+    }
+
+    // Never write a component's translation from a review sheet.
+    const guard = await componentProtectedIds(projectId);
+    const withheld = [...edits.filter((e) => guard.ids.has(e.id)).map((e) => e.id), ...approvals.filter((id) => guard.ids.has(id))];
+    const writableEdits = edits.filter((e) => !guard.ids.has(e.id));
+    const writableApprovals = approvals.filter((id) => !guard.ids.has(id));
+
+    const summary = {
+      projectId, variantId, file, status,
+      ...(dryRun ? { dryRun: true } : {}),
+      wouldEdit: writableEdits.length, wouldApprove: writableApprovals.length,
+      rejected: rejected.length, deferred: deferred.length,
+      ...(rejected.length ? { rejectedRows: rejected } : {}),
+      ...(reasons.length ? { reasonsLogged: reasons.length } : {}),
+      ...componentGuardReport(withheld, guard),
+    };
+    if (dryRun) return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
+
+    if (writableEdits.length) {
+      // Link placeholders on write, exactly as write_translations does — a
+      // reviewed translation should not arrive less linked than a machine one.
+      const known = new Set((await fetchVariables()).map((v) => v.name));
+      await dittoPatch({
+        variantId, forceVariantCreation: true,
+        updates: writableEdits.map((e) => ({
+          developerId: e.id, text: e.text, status,
+          variables: [...new Set(placeholdersOf(e.text))].filter((n) => known.has(n)),
+        })),
+      });
+    }
+    let promoted = 0;
+    if (writableApprovals.length) {
+      const res = await patchSkippingUnknown({
+        variantId, updates: writableApprovals.map((id) => ({ developerId: id, status, projectId })),
+      });
+      promoted = res.updated;
+    }
+
+    if (reasons.length) {
+      const stamp = new Date().toISOString();
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.appendFileSync(REVIEW_LOG, reasons.map((r) => JSON.stringify({ ...r, projectId, variantId, at: stamp })).join("\n") + "\n");
+    }
+
+    delete summary.wouldEdit; delete summary.wouldApprove;
+    return { content: [{ type: "text", text: JSON.stringify({ ...summary, edited: writableEdits.length, approved: promoted }, null, 2) }] };
+  },
+);
+
+server.registerTool(
+  "propose_rules_from_reviews",
+  {
+    title: "Propose voice/glossary rules from review history",
+    description:
+      "Read the reason codes reviewers logged through apply_review_csv and report which corrections " +
+      "REPEAT — those are the ones worth becoming a rule instead of being re-fixed every sprint. Groups " +
+      "by category and by the specific term corrected, and routes each group to where it belongs (glossary, " +
+      "a voice-rules section, or back to content design when the English itself was the problem). " +
+      "PROPOSES ONLY — it never writes to the style guide or the rules files. One reviewer's preference " +
+      "must not silently become a workspace rule; a human approves, then add_style_guide_rules or a file " +
+      "edit applies it.",
+    inputSchema: {
+      variantId: z.string().optional().describe("Only this variant (default: all)"),
+      projectId: z.string().optional().describe("Only this project (default: all)"),
+      minOccurrences: z.number().int().min(2).default(2)
+        .describe("How many times a correction must repeat before it is proposed (default 2 — once is an edit, twice is a pattern)"),
+    },
+  },
+  async ({ variantId, projectId, minOccurrences }) => {
+    let lines = [];
+    try { lines = fs.readFileSync(REVIEW_LOG, "utf8").split("\n").filter(Boolean); }
+    catch {
+      return { content: [{ type: "text", text:
+        "No review history yet. Reasons are recorded when a reviewer fills in `reason_category` and the " +
+        "sheet is applied with apply_review_csv." }] };
+    }
+    const entries = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter(Boolean)
+      .filter((e) => (!variantId || e.variantId === variantId) && (!projectId || e.projectId === projectId));
+    if (!entries.length) {
+      return { content: [{ type: "text", text: `No logged reviews match that filter (${entries.length} of ${lines.length} entries).` }] };
+    }
+
+    const meta = Object.fromEntries(REASON_CATEGORIES.map((c) => [c.code, c]));
+    const byVariant = {};
+    for (const e of entries) {
+      const v = (byVariant[e.variantId] ||= { total: 0, categories: {}, pairs: {} });
+      v.total++;
+      const cat = (v.categories[e.category] ||= { count: 0, examples: [] });
+      cat.count++;
+      if (cat.examples.length < 3) cat.examples.push({ base: e.base, from: e.from, to: e.to, detail: e.detail });
+      // The same source term corrected the same way more than once is the
+      // strongest signal available — that is a glossary row waiting to happen.
+      if (e.from !== e.to) {
+        const k = `${e.category}::${e.base}::${e.to}`;
+        const p = (v.pairs[k] ||= { category: e.category, base: e.base, corrected: e.to, count: 0, details: [] });
+        p.count++;
+        if (e.detail && !p.details.includes(e.detail)) p.details.push(e.detail);
+      }
+    }
+
+    const proposals = {};
+    for (const [v, d] of Object.entries(byVariant)) {
+      const repeated = Object.values(d.pairs).filter((p) => p.count >= minOccurrences)
+        .sort((a, b) => b.count - a.count);
+      const cats = Object.entries(d.categories)
+        .map(([code, c]) => ({
+          code, label: meta[code]?.label || code, count: c.count,
+          routesTo: meta[code]?.routesTo || "(unknown code)",
+          severity: meta[code]?.severity, examples: c.examples,
+        }))
+        .sort((a, b) => b.count - a.count);
+      proposals[v] = {
+        correctionsLogged: d.total,
+        byCategory: cats,
+        repeatedCorrections: repeated.map((p) => ({
+          ...p,
+          proposedAs:
+            p.category === "TERM" || p.category === "BRAND"
+              ? `${v}-glossary.md row: "${p.base}" -> "${p.corrected}"`
+              : p.category === "SRC"
+                ? "Not a translation rule — the English needs fixing. Route to content design."
+                : p.category === "MEAN" || p.category === "VAR"
+                  ? "Defect, not a style rule — no rule proposed; check why it reached review."
+                  : `${v}-voice-rules.md ${meta[p.category]?.routesTo || ""}: add a rule covering this correction`,
+        })),
+      };
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          scanned: entries.length,
+          minOccurrences,
+          proposals,
+          note:
+            "Proposals only — nothing was written. Review these with the language owner, then apply: " +
+            "glossary/voice-rules rows by editing the files under translation-assets, workspace-wide " +
+            "rules via add_style_guide_rules. Categories MEAN and VAR are defects rather than style " +
+            "preferences and never produce a rule.",
+        }, null, 2),
+      }],
+    };
+  },
+);
 
 server.registerTool(
   "export_review_sheet",

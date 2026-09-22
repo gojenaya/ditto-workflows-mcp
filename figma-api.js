@@ -121,8 +121,18 @@ function walk(node, results, ctx) {
     next.frameId = node.id;
     next.frameName = node.name;
   }
+  // Ancestor container names are the raw material for a semantic developer ID:
+  // "repayment-card__summary" says far more about a string's purpose than the
+  // string itself does. Instances carry the component name, which is better
+  // still — it names the ROLE ("Button", "Section header"). Kept shallow (the
+  // nearest 4) because deeper ancestors describe the screen, not the element.
+  if (node.name && node.type !== "TEXT") {
+    next.ancestors = [...(ctx.ancestors || []), node.name].slice(-4);
+  }
+  if (node.type === "INSTANCE" && node.name) next.componentName = node.name;
   if (node.type === "TEXT" && node.characters?.trim()) {
     const bbox = node.absoluteBoundingBox || {};
+    const st = node.style || {};
     results.push({
       figmaNodeId: node.id,
       text: node.characters,
@@ -130,6 +140,13 @@ function walk(node, results, ctx) {
       topLevelFrameId: next.frameId || node.id,
       frameName: next.frameName || "Unknown",
       position: { x: bbox.x || 0, y: bbox.y || 0, width: bbox.width || 0, height: bbox.height || 0 },
+      // Naming signals. `layerName` is often junk (copy-paste debris like
+      // "Sync Contacts" on an interest note) so it is offered, never trusted.
+      layerName: node.name || null,
+      ancestors: next.ancestors || [],
+      componentName: next.componentName || null,
+      fontSize: st.fontSize || null,
+      fontWeight: st.fontWeight || null,
     });
   }
   for (const child of node.children || []) walk(child, results, next);

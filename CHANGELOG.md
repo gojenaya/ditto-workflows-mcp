@@ -5,6 +5,43 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-09-22
+
+Developer IDs stop being the copy slugged. Ditto names a new item from its text,
+which is where `enter-your-botim-pay-password-`, `abc-1` and `13` come from, and
+a rename pass afterwards only fixes them when someone remembers to run it.
+
+The extractor was throwing away everything needed to do better: a text node's
+layer name, its ancestor containers, the component it belongs to, its size and
+weight. A string sitting in `repayment-card__summary` at 24px bold is a card
+title — the copy alone never says that.
+
+### Added
+- `propose_developer_ids` — resolves what structure can answer (component
+  library, unambiguous UI role) and hands back the rest as a **digest**: one line
+  per string with size, weight and container, in reading order. About 1,700
+  tokens for a 97-string frame, against roughly ten times that for a screenshot
+  per frame. Deduped by copy first, so a string repeated across twelve screens is
+  one decision.
+- `remember_developer_ids` — records the chosen ID per Figma node, so a second
+  link pass returns the same names instead of churning them under engineers who
+  already reference them.
+
+### Changed
+- `rename_developer_id` validates its targets: kebab-case, under 30 characters,
+  not generic (`title-2`), and not the copy slugged again — including Ditto's
+  own slug-plus-counter pattern (`abc-1` from "ABC", `home-2` from "Home"),
+  which otherwise reads as a deliberate name. `allowAnyId` overrides.
+
+### Notes
+- Figma layer names are offered but never trusted. They are frequently
+  copy-paste debris: in SNPL an interest note sits on a layer called "Sync
+  Contacts" (which appears 12 times on one page) and a figure on one called
+  "Info". A purely structural naming pass would emit `sync-contacts-note`, which
+  is worse than the status quo because it looks deliberate.
+- Containers named for a button's visual variant are rejected too — every screen
+  has a primary button, so `primary-cta` would both collide and mean nothing.
+
 ## [0.24.0] - 2026-09-22
 
 Translator review moves to CSV. The Markdown sheets were readable in chat but not

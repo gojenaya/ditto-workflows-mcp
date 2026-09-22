@@ -29,6 +29,7 @@ import {
   deriveVariableExamples,
 } from "./ditto-backend.js";
 import { parseFigmaUrl, getFigmaTextNodes, isPlaceholder, normalizeText, FIGMA_KEY_HELP } from "./figma-api.js";
+import { validateDevId, isGenericName, proposeFromStructure, buildDigest, recallDevIds, rememberDevIds } from "./dev-ids.js";
 import { toCsv, fromCsv, hashText, placeholdersOf, placeholderDiff, REASON_CATEGORIES, REASON_CODES } from "./review-csv.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2532,6 +2533,136 @@ server.registerTool(
 );
 
 server.registerTool(
+  "propose_developer_ids",
+  {
+    title: "Propose semantic developer IDs for a Figma frame",
+    description:
+      "Read a Figma frame and work out what each string's developer ID SHOULD be, before Ditto names it " +
+      "by slugging the copy (which is where `enter-your-botim-pay-password-`, `abc-1` and `13` come from). " +
+      "Returns three things: `resolved` — IDs taken from the component library or an unambiguous UI role, " +
+      "already validated; `needsNaming` — the strings structure cannot name, which are yours to name from " +
+      "the `digest`; and `digest` — one line per string carrying font size, weight and container, in " +
+      "reading order. The digest is the point: it conveys the hierarchy a flat text list loses, at roughly " +
+      "a tenth the tokens of a screenshot per frame. Decisions are remembered per Figma node, so re-running " +
+      "returns the same IDs rather than churning them under engineers. Naming nothing yourself is fine — " +
+      "pass what you decide to rename_developer_id, which applies the same validator.",
+    inputSchema: {
+      figmaUrl: z.string().describe("Figma 'Copy link to selection' URL (must contain node-id)"),
+      projectId: z.string().optional().describe("Ditto project — so proposals avoid IDs already taken there"),
+      includeDigest: z.boolean().optional().describe("Include the digest for un-nameable strings (default true)"),
+    },
+  },
+  async ({ figmaUrl, projectId, includeDigest = true }) => {
+    const { fileKey, nodeId } = parseFigmaUrl(figmaUrl);
+    const nodes = (await getFigmaTextNodes(fileKey, nodeId)).filter((n) => !isPlaceholder(n.text));
+
+    // Dedupe by copy: one string repeated across twelve screens is one naming
+    // decision, not twelve. This is most of the cost saving.
+    const byText = new Map();
+    for (const n of nodes) {
+      const k = normalizeText(n.text);
+      if (!byText.has(k)) byText.set(k, n);
+    }
+    const unique = [...byText.values()];
+
+    // Names already spoken for: the library components, and whatever the target
+    // project has, so a proposal never collides on arrival.
+    const componentNameByText = new Map();
+    try {
+      for (const c of await dittoFetch("/components")) {
+        if (!c.variantId && c.text) componentNameByText.set(c.text.trim().toLowerCase(), c.name || c.id);
+      }
+    } catch { /* components unreadable — tier 1 just yields nothing */ }
+    const taken = new Set();
+    if (projectId) {
+      try { for (const i of await fetchBaseItems(projectId)) taken.add(i.id); } catch { /* new project */ }
+    }
+
+    const remembered = recallDevIds(fileKey, unique.map((n) => n.figmaNodeId));
+    const resolved = [], needsNaming = [];
+    for (const n of unique) {
+      const mem = remembered.get(n.figmaNodeId);
+      if (mem && mem.devId) {
+        resolved.push({
+          text: n.text, devId: mem.devId, tier: "remembered", screen: n.frameName,
+          ...(mem.text && mem.text !== n.text ? { note: "copy changed since this ID was assigned — confirm it still fits" } : {}),
+        });
+        taken.add(mem.devId);
+        continue;
+      }
+      const p = proposeFromStructure(n, { componentNameByText });
+      if (p && !validateDevId(p.id, { text: n.text, taken }).length) {
+        resolved.push({ text: n.text, devId: p.id, tier: p.tier, screen: n.frameName });
+        taken.add(p.id);
+      } else {
+        needsNaming.push({
+          figmaNodeId: n.figmaNodeId,
+          text: n.text,
+          screen: n.frameName,
+          layerName: n.layerName,
+          container: (n.ancestors || []).filter((a) => !isGenericName(a)).slice(-1)[0] || null,
+          fontSize: n.fontSize,
+          bold: n.fontWeight >= 600,
+          ...(p ? { rejectedProposal: p.id, why: validateDevId(p.id, { text: n.text, taken }) } : {}),
+        });
+      }
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          figma: { fileKey, nodeId },
+          counts: {
+            textNodes: nodes.length,
+            uniqueStrings: unique.length,
+            resolved: resolved.length,
+            needsNaming: needsNaming.length,
+          },
+          resolved,
+          needsNaming,
+          ...(includeDigest && needsNaming.length ? { digest: buildDigest(needsNaming.map((x) => ({
+            ...x, ancestors: x.container ? [x.container] : [], position: { y: 0, x: 0 }, frameName: x.screen,
+          }))) } : {}),
+          howToName:
+            "Name each `needsNaming` entry from its screen, container, size and weight — a 24px bold line at " +
+            "the top of a card is that card's title, a 14px line under it is its subtitle. Describe the " +
+            "PURPOSE, not the copy: 'gold-promo-subtitle', never 'earn-3-extra'. kebab-case, 2-4 words, " +
+            "under 30 characters, unique in the project. Group repeated UI roles under a shared prefix " +
+            "(nav-home / nav-calls). Then call rename_developer_id — it re-validates, and " +
+            "remember_developer_ids records the decision so a re-run does not rename anything.",
+        }, null, 2),
+      }],
+    };
+  },
+);
+
+server.registerTool(
+  "remember_developer_ids",
+  {
+    title: "Record developer-ID decisions for a Figma file",
+    description:
+      "Persist the developer ID chosen for each Figma text node, so a later propose_developer_ids on the " +
+      "same frame returns those IDs instead of proposing new ones. Without this a second link pass churns " +
+      "names under engineers who are already referencing them — which is worse than an ugly ID. Call this " +
+      "after rename_developer_id succeeds.",
+    inputSchema: {
+      figmaUrl: z.string().describe("The Figma URL these decisions came from"),
+      decisions: z.array(z.object({
+        figmaNodeId: z.string().describe("Figma text node id (from propose_developer_ids)"),
+        devId: z.string().describe("The developer ID that was applied"),
+        text: z.string().optional().describe("The copy at the time, so later drift is visible"),
+      })).min(1),
+    },
+  },
+  async ({ figmaUrl, decisions }) => {
+    const { fileKey } = parseFigmaUrl(figmaUrl);
+    const where = rememberDevIds(fileKey, decisions);
+    return { content: [{ type: "text", text: JSON.stringify({ fileKey, remembered: decisions.length, path: where }, null, 2) }] };
+  },
+);
+
+server.registerTool(
   "rename_developer_id",
   {
     title: "Rename developer IDs (unofficial)",
@@ -2540,27 +2671,35 @@ server.registerTool(
       "UNOFFICIAL: replays the Ditto web app's internal backend API (unversioned; may break without notice) " +
       "and needs a session token (set_session_token) rather than the API key. Each rename is {from, to}. " +
       "Skips (with reasons) unknown 'from' IDs and 'to' IDs that already exist. Verifies via the public API " +
-      "afterwards. Keep new IDs kebab-case and reasonably short.",
+      "afterwards. Target IDs are validated: kebab-case, under 30 chars, not generic ('title-2'), and not " +
+      "just the copy slugged again — which is the very thing a rename exists to fix. Rejections come back " +
+      "with the reason; pass allowAnyId to override.",
     inputSchema: {
       projectId: z.string().describe("Ditto project developer ID (public API id, e.g. from list_projects)"),
       renames: z
         .array(z.object({ from: z.string().min(1), to: z.string().min(1) }))
         .min(1)
         .describe("Array of {from, to} developer-ID renames"),
+      allowAnyId: z
+        .boolean()
+        .optional()
+        .describe("Skip the semantic-ID validation (copy-derived, generic, over-long, non-kebab targets are normally rejected)"),
     },
   },
-  async ({ projectId, renames }) => {
+  async ({ projectId, renames, allowAnyId }) => {
     // 1. Project mongo id via direct backend lookup, then its items from the dump.
     const mongoProjectId = await projectMongoIdByDevId(projectId);
     const dump = await fetchWorkspaceDump();
 
     // devId → mongo _id within the project
     const idMap = new Map();
+    const textByDevId = new Map();
     const backendDevIds = new Set();
     const componentLinked = new Set();
     for (const it of dump) {
       if (it.doc_ID !== mongoProjectId || !it.developerId) continue;
       idMap.set(it.developerId, it._id);
+      textByDevId.set(it.developerId, it.text || "");
       backendDevIds.add(it.developerId);
       // How a design-system string is identified in a project is the component
       // owner's call, so component-governed items are not renamed here.
@@ -2586,6 +2725,14 @@ server.registerTool(
         results.push({ from, to, status: "skipped", reason: "no item with this developer ID in the project" });
       } else if (backendDevIds.has(to) || pendingTo.has(to)) {
         results.push({ from, to, status: "skipped", reason: "an item with the target ID already exists" });
+      } else if (!allowAnyId && validateDevId(to, { text: textByDevId.get(from) || "" }).length) {
+        // The whole point of renaming is to replace auto-generated IDs; writing
+        // another copy-derived or generic one just relocates the problem.
+        results.push({
+          from, to, status: "rejected",
+          reason: validateDevId(to, { text: textByDevId.get(from) || "" }).join("; "),
+          hint: "Describe the element's purpose, not its copy. Pass allowAnyId:true to override.",
+        });
       } else {
         try {
           await renameDevId(mongoProjectId, idMap.get(from), to);

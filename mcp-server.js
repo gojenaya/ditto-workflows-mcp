@@ -30,6 +30,7 @@ import {
 } from "./ditto-backend.js";
 import { parseFigmaUrl, getFigmaTextNodes, isPlaceholder, normalizeText, partitionByScreen, FIGMA_KEY_HELP } from "./figma-api.js";
 import { validateDevId, isGenericName, proposeFromStructure, buildDigest, recallDevIds, rememberDevIds } from "./dev-ids.js";
+import { findCopyDefects, COPY_CHECKS } from "./copy-check.js";
 import { toCsv, fromCsv, hashText, placeholdersOf, placeholderDiff, REASON_CATEGORIES, REASON_CODES } from "./review-csv.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1052,6 +1053,76 @@ server.registerTool(
 );
 
 server.registerTool(
+  "propose_copy_fixes",
+  {
+    title: "Find source-copy defects in base text",
+    description:
+      "Scan a project's ENGLISH base copy for defects a human misses when reading one screen at a time: " +
+      "typos, the same abbreviation written two ways, acronym casing that disagrees, stray whitespace, and " +
+      "trailing punctuation that disagrees between sibling strings. Checks are workspace-relative rather " +
+      "than dictionary-driven — a word appearing once while a near-identical word appears fifty times is a " +
+      "typo, and that signal does not mistake 'botim', 'SNPL' or 'Aani' for errors the way a word list does. " +
+      "REPORTS ONLY, never applies: these are copy decisions, and the fix belongs in Figma first — editing " +
+      "base text here would drop that item's variants, so a post-translation fix means re-translating it. " +
+      "Two real defects motivated this tool: an item reading 'Interes' and one reading " +
+      "'Processing fee (inclu. vat)', both of which shipped and were corrected silently by the translator, " +
+      "leaving base and Arabic disagreeing about the string.",
+    inputSchema: {
+      projectId: z.string().optional().describe("Project to scan (default: the whole workspace, which gives the frequency checks more signal)"),
+      checks: z.array(z.enum(["TYPO", "ABBREV", "ACRONYM", "SPACING", "PUNCT"])).optional()
+        .describe("Limit to these checks (default: all)"),
+      limit: z.number().int().min(1).max(500).optional().describe("Max findings to return (default 100)"),
+    },
+  },
+  async ({ projectId, checks, limit = 100 }) => {
+    const filter = projectId
+      ? JSON.stringify({ projects: [{ id: projectId }], variants: [{ id: "base" }] })
+      : JSON.stringify({ variants: [{ id: "base" }] });
+    const all = await dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`);
+    const excluded = new Set(getExcludedProjects());
+    const items = all
+      .filter((i) => !i.variantId && i.pluralForm === null && (i.text || "").trim())
+      .filter((i) => !excluded.has(i.projectId))
+      .map((i) => ({ id: i.id, text: i.text, blockName: i.blockName, projectId: i.projectId }));
+
+    let findings = findCopyDefects(items);
+    if (checks?.length) findings = findings.filter((f) => checks.includes(f.check));
+    const total = findings.length;
+    findings = findings.slice(0, limit);
+
+    // Which findings sit on an item that already has a translation — fixing
+    // those in Ditto would drop the variant, so they are the expensive ones.
+    const variantList = (await dittoFetch("/variants")).map((v) => ({ id: v.id }));
+    const withVariants = new Set(
+      (await dittoFetch(`/textItems?filter=${encodeURIComponent(JSON.stringify(
+        projectId ? { projects: [{ id: projectId }], variants: variantList } : { variants: variantList },
+      ))}`)).filter((i) => i.variantId).map((i) => i.id),
+    );
+    for (const f of findings) if (withVariants.has(f.id)) f.alreadyTranslated = true;
+
+    const byCheck = findings.reduce((a, f) => ((a[f.check] = (a[f.check] || 0) + 1), a), {});
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          scope: projectId || "whole workspace",
+          itemsScanned: items.length,
+          findings: total,
+          ...(total > findings.length ? { showing: findings.length } : {}),
+          byCheck,
+          results: findings,
+          howToFix:
+            "Fix these in FIGMA, then re-run the link pass — do not patch them here. Editing base text in " +
+            "Ditto drops that item's variants, so any finding marked alreadyTranslated costs a " +
+            "re-translation too. Report them to the designer as a list; they are copy decisions, not " +
+            "mechanical corrections, and a few will be deliberate.",
+        }, null, 2),
+      }],
+    };
+  },
+);
+
+server.registerTool(
   "update_text",
   {
     title: "Update base text",
@@ -1059,7 +1130,10 @@ server.registerTool(
       "Rewrite the text of BASE items in a project (copy edits, {{variable}} replacements). Each update is " +
       "{id, text} where id is the item's developer ID; unknown IDs are skipped, not fatal. Status is left " +
       "unchanged unless given. Note: {{name}} placeholders land as literal text — the public API cannot link " +
-      "workspace variables to items, and dev-ID renames aren't supported either; both happen in the Ditto web app.",
+      "workspace variables to items, and dev-ID renames aren't supported either; both happen in the Ditto web app. " +
+      "**Changing base text DELETES that item's existing translations.** If any target has variants this " +
+      "refuses and names them; pass dropVariants only when you mean to discard and re-translate. For a " +
+      "source-copy defect, fix it in Figma and re-run the link pass instead — that keeps the variants.",
     inputSchema: {
       projectId: z.string().describe("Ditto project developer ID"),
       updates: z
@@ -1067,16 +1141,66 @@ server.registerTool(
         .describe("Array of {id, text} — id is the base item developer ID"),
       status: z.enum(["NONE", "WIP", "REVIEW", "FINAL"]).optional()
         .describe("Also set this workflow status (default: leave unchanged)"),
+      dropVariants: z.boolean().optional()
+        .describe(
+          "Confirm that you intend to DELETE the existing translations of any item being edited. Required " +
+          "whenever a target item already has variants, because changing base text drops them all.",
+        ),
     },
   },
-  async ({ projectId, updates, status }) => {
+  async ({ projectId, updates, status, dropVariants }) => {
     if (!updates.length) {
       return { content: [{ type: "text", text: "No updates provided." }] };
     }
     const guard = await componentProtectedIds(projectId);
     const { allowed, withheld } = withheldForComponents(updates.map((u) => u.id), guard);
     const allow = new Set(allowed);
-    const writable = updates.filter((u) => allow.has(u.id));
+    let writable = updates.filter((u) => allow.has(u.id));
+
+    // Editing base text DROPS that item's existing variants — silently, and
+    // with no undo. Someone fixing a typo after translation therefore throws
+    // away every language for that string without being told. Refuse by
+    // default, name exactly what would be lost, and make the caller say so.
+    const targets = new Set(writable.map((u) => u.id));
+    const variantsByItem = new Map();
+    if (targets.size) {
+      // A projects-only filter returns BASE rows only — variant rows have to be
+      // asked for by name, so the guard would never fire without this.
+      const allVariants = (await dittoFetch("/variants")).map((v) => ({ id: v.id }));
+      const rows = await dittoFetch(
+        `/textItems?filter=${encodeURIComponent(JSON.stringify({
+          projects: [{ id: projectId }], variants: allVariants,
+        }))}`,
+      );
+      for (const r of rows) {
+        if (!r.variantId || !targets.has(r.id)) continue;
+        if (!variantsByItem.has(r.id)) variantsByItem.set(r.id, []);
+        variantsByItem.get(r.id).push(r.variantId);
+      }
+    }
+    const wouldDrop = writable
+      .filter((u) => variantsByItem.has(u.id))
+      .map((u) => ({ id: u.id, variantsLost: [...new Set(variantsByItem.get(u.id))].sort() }));
+
+    if (wouldDrop.length && !dropVariants) {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            refused: true,
+            reason:
+              "These items already have translations, and changing base text deletes them. Nothing was written.",
+            wouldDropVariants: wouldDrop,
+            whatToDoInstead:
+              "If this is a source-copy defect (a typo, a wrong abbreviation), fix it in FIGMA and re-run " +
+              "the link pass — that keeps the item and its variants intact. Only pass dropVariants: true " +
+              "when you actually intend to discard these translations and re-translate the item afterwards.",
+          }, null, 2),
+        }],
+        isError: true,
+      };
+    }
+
     let updated = 0;
     let skipped = [];
     if (writable.length) {

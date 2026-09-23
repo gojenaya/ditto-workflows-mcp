@@ -94,6 +94,20 @@ Two rules when you fan out:
    - Base: `update_status(projectId, status: "FINAL", fromStatus: ["NONE","WIP","REVIEW"])`.
    - Each variant: `update_status(projectId, status: "FINAL", variantId, fromStatus: ["NONE","WIP","REVIEW"])`.
    - **Prefer `fromStatus` over an explicit `ids` list here.** `fromStatus` derives its targets from variant rows that actually exist; an `ids` list can name items with no translation, and promoting those would mint empty copy at FINAL. The tool now refuses that and reports the skipped IDs — treat any such report as "these still need translating", not as a failure.
+5b. **Check the source copy — report, never fix.** Run `propose_copy_fixes(projectId)`. It finds typos,
+   abbreviations written two ways, acronym casing that disagrees, stray whitespace, and trailing
+   punctuation that fights its siblings — the class of defect nobody catches reading one screen at a time.
+   - **Put the findings in the final report as "fix in Figma, then re-run" — not as "fixed for you".**
+     These are copy decisions and some will be deliberate. You are handing the designer a list.
+   - **Do NOT call `update_text` to fix them.** Editing base text in Ditto **deletes that item's existing
+     translations**. After step 4 every item has variants, so a "quick typo fix" here silently throws away
+     every language for that string. `update_text` now refuses when the target has variants and names what
+     would be lost; that refusal is correct — do not pass `dropVariants` to get around it.
+   - Findings marked `alreadyTranslated` are the expensive ones: fixing them in Figma and re-running means
+     re-translating those items, because the English they were translated from has changed.
+   - Real case: a run shipped "Interes" and "Processing fee (inclu. vat)". The Arabic translator quietly
+     corrected the first, so the base and the variant then disagreed about what the string even was.
+
 6. **Audit before reporting — don't trust the step reports.** Each step returns its own summary; those summaries are what let silent failures through. Re-read the project and confirm: every item's Figma instances persisted, no dev ID still looks auto-generated, no item still holds a hardcoded dynamic value, and no variant has empty text at FINAL. Fix anything that turns up, then report.
 7. **Report once, at the end:** connected / created / renamed / variablised / translated / set-to-FINAL counts, ambiguous or skipped items, and any variables that need creating in the web app. Because the batch is already FINAL, call out anything you were unsure about so the user can spot-check it directly in Ditto.
 

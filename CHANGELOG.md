@@ -5,6 +5,40 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0] - 2026-09-23
+
+Source-copy defects. A live run shipped an item reading "Interes" and another
+reading "Processing fee (inclu. vat)" — a mistyped "incl." and a lowercase
+"vat". The Arabic translator quietly corrected the first, so the base and the
+variant then disagreed about what the string even was.
+
+### Added
+- `propose_copy_fixes` — scans base English for typos, abbreviations written two
+  ways, acronym casing that disagrees, stray whitespace, and trailing
+  punctuation that fights its siblings. **Reports only; never applies.**
+  Findings on already-translated items are marked, because those are the
+  expensive ones to fix.
+- The checks are **workspace-relative, not dictionary-driven**: a word appearing
+  once while a near-identical word appears fifty times is a typo, and that
+  signal does not mistake "botim", "SNPL" or "Aani" for errors. The first pass
+  over the real workspace returned 1,319 findings, nearly all noise; suppressing
+  rarer real words, inflections, proper nouns, sentence-final full stops and
+  apostrophe styles brought it to ~310, with the genuine defects surfacing
+  ("successfull", "microhone", "benficiary", "verifcation", "adress", "lssue").
+- `test/copy-check-test.mjs` — 16 checks. The first three are the defects that
+  shipped; the rest are false positives the first pass produced.
+- `/ditto-handoff` step 5b runs the check and reports it as "fix in Figma, then
+  re-run", explicitly not as "fixed for you".
+
+### Fixed
+- **`update_text` no longer silently deletes translations.** Changing base text
+  drops every variant of that item — irreversibly, with no warning. It now
+  refuses when a target has variants, names which languages would be lost, and
+  requires `dropVariants: true` to proceed.
+- Both new variant lookups asked for `{projects:[…]}` alone, which returns BASE
+  rows only, so the guard would never have fired and every finding would have
+  looked untranslated. Variants must be requested by name.
+
 ## [0.29.0] - 2026-09-23
 
 Three defects in the screen filter, all found on a live Salary Loan run

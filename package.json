@@ -1,6 +1,6 @@
 {
   "name": "ditto-workflows-mcp",
-  "version": "0.29.0",
+  "version": "0.30.0",
   "description": "MCP server for Ditto (dittowords.com) \u2014 drive copy workflows and glossary-aware translation from Claude",
   "license": "MIT",
   "repository": {
@@ -37,7 +37,7 @@
   },
   "scripts": {
     "start": "node mcp-server.js",
-    "test": "node test/variablise-detection-test.mjs && { [ -f test/smoke-test.js ] && node test/smoke-test.js || echo 'smoke-test.js absent (local-only: needs a live Ditto workspace) - skipped'; } && node test/screen-filter-test.mjs"
+    "test": "node test/variablise-detection-test.mjs && { [ -f test/smoke-test.js ] && node test/smoke-test.js || echo 'smoke-test.js absent (local-only: needs a live Ditto workspace) - skipped'; } && node test/screen-filter-test.mjs && node test/copy-check-test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

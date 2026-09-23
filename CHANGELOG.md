@@ -5,6 +5,43 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - 2026-09-23
+
+Three defects in the screen filter, all found on a live Salary Loan run
+(LGHGeKlrPzcSCJETp9C4PS), all of which passed the `floating === 0` guardrail
+while still shipping wrong copy.
+
+### Fixed
+- **The screen was mis-identified whenever it was an INSTANCE.** `walk` recorded
+  the screen only on `FRAME`, so on a file whose screens are instances of a
+  template it descended past the 393x852 screen and treated the first nested
+  frame as the screen. A "Learn more" label inside a 77px auto-layout button was
+  rejected as "frame is 77px wide" while the rest of that same screen imported
+  fine. The screen is now the outermost container below the selection root,
+  whatever its type.
+- **Cropped detail frames passed the width test.** "installment 2-6" is a
+  353x520 FRAME — phone-width, but an excerpt rather than a screen. Bounds now
+  include `minHeight` (600 by default, overridable via `screenBounds`). The
+  rejection says outright that a legitimate bottom sheet would land here too, so
+  it is judged rather than trusted.
+- **A COMPONENT_SET bypassed every check and duplicated its copy.** A set is N
+  variants of ONE component, so importing it yields duplicates by construction —
+  "Repayment Plans" contributed 31 redundant strings. Only the default variant
+  (Figma's first child) is imported now; `includeComponentSets: true` restores
+  the old behaviour for the rare file that keeps distinct copy per variant. A
+  standalone COMPONENT is still exempt from size checks, since that is where
+  Figma legitimately stores component copy.
+
+### Changed
+- `/ditto-handoff` now has two guardrails after the link pass, not one.
+  Guardrail A is to **read and judge `skippedOffScreenItems`** — both of these
+  defects were visible in that list and went unnoticed because the skill only
+  asked for `floating === 0`.
+
+### Added
+- `test/screen-filter-test.mjs` — 13 checks, one per defect plus the behaviour
+  each fix must not break, with the real node IDs in the comments.
+
 ## [0.28.0] - 2026-09-23
 
 Only product copy reaches Ditto now.

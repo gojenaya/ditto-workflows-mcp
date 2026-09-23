@@ -54,7 +54,18 @@ Two rules when you fan out:
 1. **Link-pass:** call `figma_link_pass(projectId, figmaUrl)`.
    - Missing/expired session token → tell the user a browser window is opening, call `login_to_ditto`, retry.
    - Missing `FIGMA_API_KEY` → relay the setup instructions and stop (genuine blocker).
-   - **Guardrail — items must NOT be floating.** Linking a Figma frame is only "done" when every item's copy actually lands under its frame in Ditto (the `connect` step persisted its instances). Check **both** `counts.floating === 0` **and** `counts.instancesPersisted === counts.instancesConnected`. `floating` now covers created *and* connected-to-existing items and counts partial persistence (fewer instances than sent), not just zero — an earlier version scoped it to created items only, which made `floating: 0` mean "no NEW item is floating" while most of the connected ones had silently landed nowhere. The tool resolves the true page, sends the connect in small batches, and re-verifies with retries, so anything still short means the backend genuinely rejected it. Do NOT proceed as if the section is linked. Diagnose before continuing:
+   - **Guardrail A — read `skippedOffScreenItems` and JUDGE it. This is not a formality.** The filter keeps
+     only text on a product screen; everything else is listed with a reason. Two failure modes, and the
+     second is the dangerous one:
+     - *Something skipped is real copy.* A short bottom-sheet frame trips the height check, an unusual
+       screen size trips the width check, and a component set whose variants genuinely differ loses all
+       but the default. Re-run with `screenBounds` widened, or `includeComponentSets: true`, for that case.
+     - *Something imported is not copy.* Slides, flow labels and designer notes that slipped through.
+     Report what was skipped in the final summary either way — the user knows their file; you do not.
+     Checking `floating === 0` alone tells you nothing about this: on a real Salary Loan run, a
+     mis-detected screen container and a duplicated component set both passed the floating check and
+     still shipped wrong copy.
+   - **Guardrail B — items must NOT be floating.** Linking a Figma frame is only "done" when every item's copy actually lands under its frame in Ditto (the `connect` step persisted its instances). Check **both** `counts.floating === 0` **and** `counts.instancesPersisted === counts.instancesConnected`. `floating` now covers created *and* connected-to-existing items and counts partial persistence (fewer instances than sent), not just zero — an earlier version scoped it to created items only, which made `floating: 0` mean "no NEW item is floating" while most of the connected ones had silently landed nowhere. The tool resolves the true page, sends the connect in small batches, and re-verifies with retries, so anything still short means the backend genuinely rejected it. Do NOT proceed as if the section is linked. Diagnose before continuing:
      - Common cause: a `figmaPageId` / frame mismatch, or the Figma node is already claimed by another item. The `floating` list names the affected items + screens.
      - Workaround (as used in the SNPL branch case): re-run the `connect` for just the floating items with the **correct resolved page** (`GET /v1/files/{key}?ids={node}&depth=2` → the one CANVAS that comes back with children is the real page), then re-verify `figmaV2.instances` persisted. Only continue once `floating` is 0.
      - If it still won't link after the workaround, stop and report it — shipping floating copy to FINAL is worse than pausing.

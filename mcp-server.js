@@ -2325,9 +2325,28 @@ server.registerTool(
           "Also import text that is not on a product screen — slides, spec boards, flow labels and loose " +
           "annotations. Off by default; they are design commentary, not copy an engineer references.",
         ),
+      includeComponentSets: z
+        .boolean()
+        .optional()
+        .describe(
+          "Import every variant of a component set, not just the default one. Off by default because a set " +
+          "is N states of ONE component, so its variants restate the same copy and arrive as duplicates. " +
+          "Turn on only when a designer genuinely keeps different copy per variant.",
+        ),
+      screenBounds: z
+        .object({
+          minWidth: z.number().optional(),
+          maxWidth: z.number().optional(),
+          minHeight: z.number().optional(),
+        })
+        .optional()
+        .describe(
+          "Override what counts as a product screen (default 280-600px wide, at least 600px tall). Lower " +
+          "minHeight for a file of bottom sheets; widen for tablet or desktop work.",
+        ),
     },
   },
-  async ({ projectId, figmaUrl, includeOffScreen }) => {
+  async ({ projectId, figmaUrl, includeOffScreen, includeComponentSets, screenBounds }) => {
     const { fileKey, nodeId } = parseFigmaUrl(figmaUrl);
 
     // 1. Figma text nodes under the selection (placeholders + hidden pruned).
@@ -2339,7 +2358,7 @@ server.registerTool(
     // will ever reference, and all of it used to become Ditto items.
     const { onScreen, offScreen } = includeOffScreen
       ? { onScreen: afterPlaceholders, offScreen: [] }
-      : partitionByScreen(afterPlaceholders);
+      : partitionByScreen(afterPlaceholders, screenBounds, { includeComponentSets });
     const realNodes = onScreen;
     if (!realNodes.length) {
       return {

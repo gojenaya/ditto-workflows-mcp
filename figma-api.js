@@ -110,6 +110,9 @@ async function resolvePageId(fileKey, nodeId) {
   }
 }
 
+// Any of these can be the top-level container of a screen.
+const SCREEN_CONTAINERS = new Set(["FRAME", "INSTANCE", "COMPONENT", "COMPONENT_SET", "GROUP"]);
+
 function walk(node, results, ctx) {
   if (!node) return;
   // Hidden layers: Figma marks only the hidden node itself, not its children —
@@ -117,12 +120,20 @@ function walk(node, results, ctx) {
   if (node.visible === false) return;
   const next = { ...ctx };
   if (node.type === "CANVAS") next.pageId = node.id;
-  if (node.type === "FRAME" && !ctx.frameId) {
+  // The SCREEN is the outermost container below the selection root, whatever
+  // its type. Recording it only for FRAME meant that on a file whose screens are
+  // INSTANCEs (a common pattern — screens built from a template component), the
+  // walk descended past the 393x852 screen and treated the first nested FRAME as
+  // the screen instead. A "Learn more" label inside a 77px auto-layout button
+  // then looked like it lived on a 77px screen and was rejected, while the rest
+  // of the copy on that same screen imported fine.
+  if (SCREEN_CONTAINERS.has(node.type) && !ctx.frameId) {
     const fb = node.absoluteBoundingBox || {};
     next.frameId = node.id;
     next.frameName = node.name;
     next.frameWidth = fb.width || 0;
     next.frameHeight = fb.height || 0;
+    next.frameType = node.type;
   }
   // Ancestor container names are the raw material for a semantic developer ID:
   // "repayment-card__summary" says far more about a string's purpose than the
@@ -138,6 +149,18 @@ function walk(node, results, ctx) {
   // Figma keeps component definitions. Without this, every design-system
   // component's copy is misread as an annotation.
   if (node.type === "COMPONENT" || node.type === "COMPONENT_SET") next.inComponent = true;
+  // Tracked separately from inComponent: a COMPONENT_SET is N variants of ONE
+  // component, so its strings are duplicates by construction.
+  if (node.type === "COMPONENT_SET") {
+    next.componentSetId = node.id;
+    next.componentSetName = node.name;
+  }
+  // Which variant within the set this text belongs to — Figma names variants
+  // "Property 1=Value", and the FIRST child of the set is the default.
+  if (node.type === "COMPONENT" && ctx.componentSetId && !ctx.variantId) {
+    next.variantId = node.id;
+    next.variantName = node.name;
+  }
   if (node.type === "TEXT" && node.characters?.trim()) {
     const bbox = node.absoluteBoundingBox || {};
     const st = node.style || {};
@@ -155,7 +178,12 @@ function walk(node, results, ctx) {
       frameWidth: next.frameWidth || 0,
       frameHeight: next.frameHeight || 0,
       inFrame: !!next.frameId,
+      frameType: next.frameType || null,
       inComponent: !!next.inComponent,
+      componentSetId: next.componentSetId || null,
+      componentSetName: next.componentSetName || null,
+      variantId: next.variantId || null,
+      variantName: next.variantName || null,
       layerName: node.name || null,
       ancestors: next.ancestors || [],
       componentName: next.componentName || null,
@@ -181,20 +209,51 @@ function walk(node, results, ctx) {
 
 // Generous enough for iPhone SE (320) through to a large Android (480), and for
 // a tall scrolling artboard. Override per call when a project designs tablet.
-export const DEFAULT_SCREEN_BOUNDS = { minWidth: 280, maxWidth: 600 };
+// minHeight exists because width alone cannot separate a screen from a cropped
+// detail: a 353x520 "installment 2-6" frame is phone-width but is an excerpt of
+// a screen, not a screen. Real screens in the files seen so far are >=852px tall.
+export const DEFAULT_SCREEN_BOUNDS = { minWidth: 280, maxWidth: 600, minHeight: 600 };
 
 export function classifyTextNode(node, bounds = DEFAULT_SCREEN_BOUNDS) {
-  // Component definitions are product copy wherever they live on the canvas.
+  const b = { ...DEFAULT_SCREEN_BOUNDS, ...bounds };
+
+  // A COMPONENT_SET is N variants of ONE component: "Split in 5" / "Split in 6"
+  // are the same string in different states, so importing the set produces
+  // duplicates by construction that then have to be merged. Only the default
+  // variant — Figma's first child of the set — carries the canonical copy.
+  if (node.componentSetId && node.variantId && node.variantId !== node.defaultVariantId) {
+    return {
+      onScreen: false,
+      reason:
+        `non-default variant "${node.variantName || "?"}" of component set "${node.componentSetName || "?"}" — ` +
+        "variants restate one component's copy, so only the default variant is imported " +
+        "(pass includeComponentSets to import every variant)",
+    };
+  }
+
+  // A single component definition is product copy wherever it sits on the canvas
+  // — that is simply where Figma stores it.
   if (node.inComponent) return { onScreen: true };
+
   if (!node.inFrame) {
     return { onScreen: false, reason: "not inside any frame or component — loose text on the canvas or section" };
   }
   const w = node.frameWidth || 0;
-  if (w && (w < bounds.minWidth || w > bounds.maxWidth)) {
+  if (w && (w < b.minWidth || w > b.maxWidth)) {
     return {
       onScreen: false,
-      reason: `frame is ${Math.round(w)}px wide — outside the ${bounds.minWidth}-${bounds.maxWidth}px device range ` +
+      reason: `screen is ${Math.round(w)}px wide — outside the ${b.minWidth}-${b.maxWidth}px device range ` +
         `(slide, spec board or documentation frame)`,
+    };
+  }
+  const h = node.frameHeight || 0;
+  if (h && h < b.minHeight) {
+    return {
+      onScreen: false,
+      reason:
+        `screen is only ${Math.round(h)}px tall (under ${b.minHeight}) — looks like a cropped detail or excerpt ` +
+        "rather than a full screen. CHECK THIS ONE: a legitimate bottom-sheet or short modal frame would " +
+        "also land here, and should be imported by lowering minHeight",
     };
   }
   return { onScreen: true };
@@ -204,10 +263,24 @@ export function classifyTextNode(node, bounds = DEFAULT_SCREEN_BOUNDS) {
 // Returns both halves: what is skipped must be reported, never silently dropped
 // — a designer whose annotation is excluded should be told, and a real screen
 // wrongly excluded has to be visible to be fixable.
-export function partitionByScreen(nodes, bounds = DEFAULT_SCREEN_BOUNDS) {
-  const onScreen = [], offScreen = [];
+export function partitionByScreen(nodes, bounds = DEFAULT_SCREEN_BOUNDS, opts = {}) {
+  // Figma returns a component set's children in document order, so its first
+  // variant is the default. Resolve that once per set, then every text node in
+  // the set knows whether it belongs to the default variant.
+  const defaultVariantBySet = new Map();
   for (const n of nodes) {
-    const c = classifyTextNode(n, bounds);
+    if (n.componentSetId && n.variantId && !defaultVariantBySet.has(n.componentSetId)) {
+      defaultVariantBySet.set(n.componentSetId, n.variantId);
+    }
+  }
+  const onScreen = [], offScreen = [];
+  for (const raw of nodes) {
+    const n = raw.componentSetId
+      ? { ...raw, defaultVariantId: defaultVariantBySet.get(raw.componentSetId) }
+      : raw;
+    const c = opts.includeComponentSets && n.componentSetId
+      ? { onScreen: true }
+      : classifyTextNode(n, bounds);
     (c.onScreen ? onScreen : offScreen).push(c.onScreen ? n : { ...n, skipReason: c.reason });
   }
   return { onScreen, offScreen };

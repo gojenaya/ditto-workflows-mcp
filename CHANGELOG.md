@@ -5,6 +5,18 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.0] - 2026-09-23
+
+### Fixed
+- Plural detection fired on **amount and date placeholders whose names happen to
+  contain a countable noun** — `{{installment_amount}}` contains "installment",
+  `{{total_repayment_amount}}` contains "repayment", `{{buy_order_total}}`
+  contains "order". All are money, none is a count. The not-a-count guard
+  applied only to the positional rule; it now applies to the name-based rule too.
+- A string that is **only** a placeholder (`{{month_year}}`) has no word to
+  inflect and can never need plural forms, whatever the placeholder is called.
+- Together these cut the English plural backlog from 77 items to 43 real ones.
+
 ## [0.31.0] - 2026-09-23
 
 Plural forms. Every tool filtered `pluralForm === null`, so plurals could be

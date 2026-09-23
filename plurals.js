@@ -121,6 +121,14 @@ export function isPluralCandidate(text) {
 
   const ph = t.match(COUNT_PLACEHOLDER);
   if (!ph) return null;
+  // The NOT_A_COUNT guard has to apply here too, not only to the positional
+  // rule: "{{installment_amount}}" contains "installment" and
+  // "{{total_repayment_amount}}" contains "repayment", but both are money.
+  if (NOT_A_COUNT.test(ph[1])) return null;
+
+  // A string that is ONLY a placeholder has no word to inflect, so it cannot
+  // need plural forms however its placeholder is named.
+  if (!t.replace(/\{\{[^}]*\}\}/g, " ").match(/[A-Za-z]{2,}/)) return null;
 
   // The countable noun must be NEAR the placeholder — "{{days}} days" and
   // "Split in {{installment_count}}" both qualify, but a count at one end of a

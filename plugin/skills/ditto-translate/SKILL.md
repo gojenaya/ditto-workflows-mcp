@@ -36,11 +36,37 @@ Independent by construction: different variants are different variant writes wit
    - **`conflict` → approved copy exists but the workspace disagrees with itself.** Do NOT pick one silently. Either use the glossary to settle it and say so in your report, or skip the string. These never appear in the memory file at all, so this is the only way you'll see them.
    - **`none` → translate from scratch.**
    - Always: apply locked glossary terms exactly; follow the voice rules; preserve `{{variables}}`/placeholders untranslated; keep UI-string lengths sensible.
+5b. **Plural forms — when the target has more categories than English.** English has two plural
+   categories (`one`, `other`); Arabic has six (`zero one two few many other`), Russian, Polish and
+   Czech four, Indonesian one. `list_untranslated` reports `pluralCategoriesForLocale` and flags each
+   item that needs them — `needsPluralForms` for new work, `incompletePluralForms` for items already
+   translated but short of the locale's categories.
+   - **Write the forms; do not force one template.** A single Arabic string cannot be correct for 1, 2,
+     3 and 11 at once. `ar-voice-rules.md` §5 has prescribed this from the start; until now the skill
+     gave no mechanism, so the agent fell back to one form and said so in its notes. The mechanism is
+     the `plurals` field:
+     `write_translations([{ id, plurals: { one: …, two: …, few: …, many: …, other: … } }], "ar")`
+   - `text` and `plurals` are mutually exclusive — pass one or the other. Ditto derives the item's
+     display text from the first form.
+   - **Categories are validated against the target locale and a wrong one is refused.** Ditto itself
+     accepts a `few` form on English and creates something no runtime will ever select, so the check
+     lives here. `zero` is optional in Arabic — most UIs never render a zero count — but the other five
+     are not.
+   - Arabic guidance, consistent with `ar-voice-rules.md` §5: `one` singular, `two` dual (`قسطان`),
+     `few` (3–10) plural (`{{n}} أقساط`), `many` (11–99) singular accusative (`{{n}} قسطًا`), `other`
+     (100+) singular (`{{n}} قسط`).
+   - Keep the placeholder in every form, verbatim.
+
 6. **Self-review each batch before writing:** re-check every translation against the memory, locked terms, and voice rules; fix violations. Skip (don't guess) strings that can't be translated confidently without UI context — ambiguous single words, truncated fragments.
 7. **Write back:** `write_translations(batch, variantId, status: "FINAL")` — one call per batch. This variant writes FINAL directly; there is no WIP/REVIEW staging step.
 8. **Return / report:** as a subagent, return the compact summary object only. Running inline, report total written (at FINAL) + every skipped item with the reason. Because translations land at FINAL immediately, be conservative — skip anything you can't translate confidently rather than committing a guess as approved copy.
 
 ## Rules
+
+- **A locale with more plural categories than the source needs plural forms, not a compromise string.**
+  Writing one Arabic form for `{{installment_count}} installments` is grammatically wrong for five of
+  Arabic's six categories. Two live items shipped that way (`split-plan-option`,
+  `installments-count-title` in salary-loan) before the tooling could express plurals at all.
 
 - **Components are never translated here — including when the translation is missing.** A library component's translations belong to the component and are written by its owner in the Ditto web app. An *absent* translation is not an invitation: writing it would push unreviewed copy into every project using that component. `list_untranslated` and `list_for_review` leave component-governed items out, and `write_translations` refuses them (`componentLinkedSkipped`). Report them to the owner; never route around it by writing to the project item, and never count them as your own skipped items — they were never yours to translate.
 - The glossary lives in the MCP resource — read it fresh every run; never copy its rules into this skill or assume them from memory.

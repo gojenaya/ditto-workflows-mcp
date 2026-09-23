@@ -5,6 +5,48 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0] - 2026-09-23
+
+Plural forms. Every tool filtered `pluralForm === null`, so plurals could be
+neither read nor written — and two live items shipped to Arabic FINAL with a
+single form, which is wrong for five of Arabic's six categories.
+
+### Added
+- **CLDR categories per locale** (`plurals.js`). Arabic has six, Slavic four,
+  English two, Indonesian one. **Ditto does not validate these**: writing a
+  `few` form onto English returns 200 and creates a form no runtime will ever
+  select, so the check has to live here. Wrong categories are refused; a partial
+  set (Arabic without `zero`) is written and the gap reported.
+- **Write**: `write_translations` and `update_text` accept
+  `plurals: {category: text}`. `text` and `plurals` are mutually exclusive —
+  Ditto derives the display text from the first form.
+- **Read**: `list_untranslated` reports `pluralCategoriesForLocale`,
+  `needsPluralForms` for new work and `incompletePluralForms` for items already
+  translated but short of the locale's categories. `search_text` surfaces plural
+  rows instead of hiding them. `export_review_csv` gains a `plural_form` column
+  and a row per form, each compared against its own source form;
+  `apply_review_csv` writes them back by upserting that form.
+- **Detection**: a string is a plural candidate when a count-bearing placeholder
+  sits next to a countable noun. The positional rule matters more than the name
+  — `Confirm {{tenor}} payments` reads as a duration but substitutes 3 or 6, and
+  already had plural forms in SNPL. Placeholders that are emphatically not counts
+  (`card_last4`, `amount`, `date`) are excluded.
+- `/ditto-translate` now has the mechanism to go with `ar-voice-rules.md` §5,
+  which has prescribed plural forms from the start while the skill offered no way
+  to write them — so the agent fell back to one form and said so in its notes.
+
+### Fixed
+- Backfilled the live case: `split-plan-option` and `installments-count-title`
+  in salary-loan now carry one/two/few/many/other in Arabic —
+  `one` singular, `two` dual, `few` (3-10) plural, `many` (11-99) singular
+  accusative, `other` singular, per `ar-voice-rules.md` §5.
+
+### Notes
+- Plural rows come back from the API with a suffixed developer ID
+  (`split-plan-option_few`), not as a field on the item — which is why an
+  exact-ID lookup appears to show nothing after a successful write.
+- `test/plurals-test.mjs`, 18 checks.
+
 ## [0.30.0] - 2026-09-23
 
 Source-copy defects. A live run shipped an item reading "Interes" and another

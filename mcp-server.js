@@ -31,6 +31,7 @@ import {
 import { parseFigmaUrl, getFigmaTextNodes, isPlaceholder, normalizeText, partitionByScreen, FIGMA_KEY_HELP } from "./figma-api.js";
 import { validateDevId, isGenericName, proposeFromStructure, buildDigest, recallDevIds, rememberDevIds } from "./dev-ids.js";
 import { findCopyDefects, COPY_CHECKS } from "./copy-check.js";
+import { categoriesFor, validatePluralForms, isPluralCandidate, findPluralCandidates, localeOf, knownLocale, ALL_CATEGORIES } from "./plurals.js";
 import { toCsv, fromCsv, hashText, placeholdersOf, placeholderDiff, REASON_CATEGORIES, REASON_CODES } from "./review-csv.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -64,13 +65,30 @@ if (!process.env.DITTO_API_KEY) {
 // ─── HELPERS ───────────────────────────────────────────────────────────────────
 
 // Base text items for a project (variantId === null), any status.
-async function fetchBaseItems(projectId) {
+async function fetchBaseItems(projectId, { includePlurals = false } = {}) {
   const filter = JSON.stringify({
     projects: [{ id: projectId }],
     statuses: ["NONE", "WIP", "REVIEW", "FINAL"],
   });
   const all = await dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`);
-  return all.filter((i) => i.variantId === null && i.pluralForm === null);
+  // Plural rows are excluded by DEFAULT so existing callers keep their shape —
+  // a plural form is a facet of an item, not a separate string to translate or
+  // rename. Callers that need them ask.
+  return all.filter((i) => i.variantId === null && (includePlurals || i.pluralForm === null));
+}
+
+// Plural forms a variant already carries, keyed by dev ID. Needed because the
+// plural rows come back as separate rows rather than a field on the item.
+async function fetchVariantPluralForms(projectId, variantId) {
+  const filter = JSON.stringify({ projects: [{ id: projectId }], variants: [{ id: variantId }] });
+  const rows = await dittoFetch(`/textItems?filter=${encodeURIComponent(filter)}`);
+  const out = new Map();
+  for (const r of rows) {
+    if (r.variantId !== variantId || !r.pluralForm) continue;
+    if (!out.has(r.id)) out.set(r.id, []);
+    out.get(r.id).push(r.pluralForm);
+  }
+  return out;
 }
 
 // Dev IDs that already have the given variant.
@@ -687,10 +705,12 @@ server.registerTool(
       dittoFetch("/components"),
     ]);
     const q = query.toLowerCase();
+    // Plural rows are real copy and were previously invisible to search — a
+    // string could exist in the workspace and return "not found".
     const matches = (list) =>
-      list.filter(
-        (i) => i.variantId === null && i.pluralForm === null && i.text?.toLowerCase().includes(q),
-      );
+      list
+        .filter((i) => i.variantId === null && i.text?.toLowerCase().includes(q))
+        .map((i) => (i.pluralForm ? { ...i, pluralForm: i.pluralForm } : i));
 
     const textMatches = matches(items);
     const compMatches = matches(comps);
@@ -740,18 +760,55 @@ server.registerTool(
   },
   async ({ projectId, variantId }) => {
     variantId = requireVariant(variantId);
-    const [base, have] = await Promise.all([
+    const [base, have, pluralRows] = await Promise.all([
       fetchBaseItems(projectId),
       fetchVariantIds(projectId, variantId),
+      fetchBaseItems(projectId, { includePlurals: true }),
     ]);
     // A component's translations belong to the component, so its items are not
     // work for a translator here — offering them is what leads to writing them.
     const guard = await componentProtectedIds(projectId);
     const candidates = base.filter((i) => !have.has(i.id) && isTranslatable(i.text));
+
+    // Which plural forms the SOURCE already carries, and which the target
+    // locale requires. An item whose English has one/other still needs six
+    // forms in Arabic, and that work was previously invisible here.
+    const baseForms = new Map();
+    for (const r of pluralRows) {
+      if (!r.pluralForm) continue;
+      if (!baseForms.has(r.id)) baseForms.set(r.id, []);
+      baseForms.get(r.id).push(r.pluralForm);
+    }
+    const variantForms = await fetchVariantPluralForms(projectId, variantId);
+
     const untranslated = candidates
       .filter((i) => !guard.ids.has(i.id))
-      .map((i) => ({ id: i.id, text: i.text }));
+      .map((i) => {
+        const required = categoriesFor(variantId);
+        const hit = isPluralCandidate(i.text);
+        return {
+          id: i.id,
+          text: i.text,
+          ...(baseForms.has(i.id) ? { sourcePluralForms: baseForms.get(i.id) } : {}),
+          ...(hit && required.length > 1
+            ? { needsPluralForms: required, whyPlural: hit.why }
+            : {}),
+        };
+      });
     const componentWithheld = candidates.filter((i) => guard.ids.has(i.id)).map((i) => i.id);
+
+    // Items already translated but whose plural coverage is short of the
+    // locale's categories — not "untranslated", but not finished either.
+    const incompletePlurals = [];
+    for (const i of base) {
+      if (!have.has(i.id) || guard.ids.has(i.id)) continue;
+      const required = categoriesFor(variantId);
+      if (required.length <= 1) break;
+      if (!isPluralCandidate(i.text)) continue;
+      const got = variantForms.get(i.id) || [];
+      const missing = required.filter((r) => !got.includes(r));
+      if (missing.length) incompletePlurals.push({ id: i.id, text: i.text, has: got, missing });
+    }
     return {
       content: [
         {
@@ -762,6 +819,16 @@ server.registerTool(
               variantId,
               count: untranslated.length,
               items: untranslated,
+              pluralCategoriesForLocale: categoriesFor(variantId),
+              ...(incompletePlurals.length
+                ? {
+                    incompletePluralForms: incompletePlurals,
+                    incompletePluralFormsNote:
+                      `These already have a ${variantId} translation but not every plural form the locale ` +
+                      "needs, so they are grammatically wrong for the counts they are missing. Write them " +
+                      "with write_translations `plurals`.",
+                  }
+                : {}),
               ...componentGuardReport(componentWithheld, guard),
             },
             null,
@@ -787,8 +854,20 @@ server.registerTool(
       "with link_variables first.",
     inputSchema: {
       translations: z
-        .array(z.object({ id: z.string(), text: z.string() }))
-        .describe("Array of {id, text} — id is the base item developer ID"),
+        .array(z.object({
+          id: z.string(),
+          text: z.string().optional().describe("The translation. Omit when providing `plurals`."),
+          plurals: z
+            .record(z.string())
+            .optional()
+            .describe(
+              "Plural forms as {category: text}, e.g. {one:…, two:…, few:…, many:…, other:…}. Categories " +
+              "are validated against the TARGET locale — Arabic has six, English two, Indonesian one — and " +
+              "a category the locale does not have is rejected rather than written, because Ditto accepts " +
+              "it but no runtime would ever select it. Mutually exclusive with `text`.",
+            ),
+        }))
+        .describe("Array of {id, text} or {id, plurals} — id is the base item developer ID"),
       variantId: z.string().optional().describe("Variant to write (default: configured default variant)"),
       status: z.enum(["NONE", "WIP", "REVIEW", "FINAL"]).default("WIP"),
     },
@@ -818,10 +897,12 @@ server.registerTool(
     // Non-global copy on purpose: `.test()` on a /g regex advances lastIndex
     // between calls, so a shared one would skip matches inside `.some()`.
     const HAS_PLACEHOLDER = /\{\{\s*[A-Za-z0-9_]+\s*\}\}/;
-    const anyPlaceholders = writable.some((t) => HAS_PLACEHOLDER.test(t.text));
+    const anyPlaceholders = writable.some((t) =>
+      HAS_PLACEHOLDER.test(t.text || "") || Object.values(t.plurals || {}).some((x) => HAS_PLACEHOLDER.test(x)));
     const known = anyPlaceholders ? new Set((await fetchVariables()).map((v) => v.name)) : new Set();
     const unlinkable = new Set();
     const namesIn = (text) => {
+      text = text || "";
       const names = [];
       for (const m of text.matchAll(PLACEHOLDER)) {
         if (known.has(m[1])) {
@@ -832,33 +913,85 @@ server.registerTool(
       }
       return names;
     };
+    // Plural categories are validated against the TARGET locale before anything
+    // is written. Ditto accepts a `few` form on English and creates something no
+    // runtime can select, so the check has to be ours.
+    const rejected = [];
+    const okToWrite = [];
+    for (const t of writable) {
+      if (t.plurals && t.text !== undefined) {
+        rejected.push({ id: t.id, why: "give either `text` or `plurals`, not both — Ditto rejects the combination" });
+        continue;
+      }
+      if (!t.plurals && (t.text === undefined || t.text === "")) {
+        rejected.push({ id: t.id, why: "no `text` and no `plurals`" });
+        continue;
+      }
+      if (t.plurals) {
+        const v = validatePluralForms(variantId, t.plurals);
+        if (!v.valid) {
+          rejected.push({ id: t.id, why: "invalid plural categories for this locale", invalid: v.invalid });
+          continue;
+        }
+        if (v.missing.length) {
+          // Not fatal — a partial set is still better than none — but the gap
+          // is reported so nobody assumes the item is finished.
+          t._missingForms = v.missing;
+        }
+      }
+      okToWrite.push(t);
+    }
+
     let linkedCount = 0;
-    if (writable.length) {
+    const pluralItems = [];
+    if (okToWrite.length) {
       await dittoPatch({
         variantId,
         forceVariantCreation: true,
-        updates: writable.map((t) => {
+        updates: okToWrite.map((t) => {
+          if (t.plurals) {
+            const forms = Object.entries(t.plurals);
+            for (const [, text] of forms) linkedCount += namesIn(text).length;
+            pluralItems.push({
+              id: t.id,
+              forms: forms.map(([f]) => f),
+              ...(t._missingForms ? { missingForms: t._missingForms } : {}),
+            });
+            return {
+              developerId: t.id,
+              status,
+              // `text` and `plurals` cannot both be sent; the display text is
+              // derived from the first form by Ditto itself.
+              plurals: { upsert: forms.map(([form, text]) => ({ form, text })) },
+            };
+          }
           const variables = namesIn(t.text);
           linkedCount += variables.length;
-          return {
-            developerId: t.id,
-            text: t.text,
-            status,
-            variables,
-          };
+          return { developerId: t.id, text: t.text, status, variables };
         }),
       });
     }
+    const writtenCount = okToWrite.length;
     return {
       content: [
         {
           type: "text",
           text: JSON.stringify(
             {
-              wrote: writable.length,
+              wrote: writtenCount,
               variantId,
               status,
               variablesLinked: linkedCount,
+              pluralCategoriesForLocale: categoriesFor(variantId),
+              ...(pluralItems.length ? { pluralised: pluralItems } : {}),
+              ...(rejected.length
+                ? {
+                    rejected,
+                    rejectedNote:
+                      "Nothing was written for these. A category the target locale does not have would " +
+                      "create a form no runtime selects, so it is refused rather than accepted silently.",
+                  }
+                : {}),
               ...(unlinkable.size
                 ? {
                     unlinkedPlaceholders: [...unlinkable],
@@ -1156,6 +1289,23 @@ server.registerTool(
     const { allowed, withheld } = withheldForComponents(updates.map((u) => u.id), guard);
     const allow = new Set(allowed);
     let writable = updates.filter((u) => allow.has(u.id));
+    // Base plurals use English's categories (one/other). Validated for the same
+    // reason as the variant path: Ditto accepts a `few` form and creates
+    // something no runtime can ever select.
+    const pluralRejected = [];
+    writable = writable.filter((u) => {
+      if (!u.plurals) return true;
+      if (u.text !== undefined) {
+        pluralRejected.push({ id: u.id, why: "give either `text` or `plurals`, not both" });
+        return false;
+      }
+      const v = validatePluralForms("base", u.plurals);
+      if (!v.valid) {
+        pluralRejected.push({ id: u.id, why: "invalid plural categories for English", invalid: v.invalid });
+        return false;
+      }
+      return true;
+    });
 
     // Editing base text DROPS that item's existing variants — silently, and
     // with no undo. Someone fixing a typo after translation therefore throws
@@ -1205,12 +1355,19 @@ server.registerTool(
     let skipped = [];
     if (writable.length) {
       ({ updated, skipped } = await patchSkippingUnknown({
-        updates: writable.map((u) => ({
-          developerId: u.id,
-          text: u.text,
-          projectId,
-          ...(status ? { status } : {}),
-        })),
+        updates: writable.map((u) => (u.plurals
+          ? {
+              developerId: u.id,
+              projectId,
+              ...(status ? { status } : {}),
+              plurals: { upsert: Object.entries(u.plurals).map(([form, text]) => ({ form, text })) },
+            }
+          : {
+              developerId: u.id,
+              text: u.text,
+              projectId,
+              ...(status ? { status } : {}),
+            })),
       }));
     }
     return {
@@ -1221,6 +1378,7 @@ server.registerTool(
             updated,
             ...(status ? { status } : {}),
             ...(skipped.length ? { unknownIdsSkipped: skipped } : {}),
+            ...(pluralRejected.length ? { pluralRejected } : {}),
             ...componentGuardReport(withheld, guard),
           },
           null,
@@ -1436,17 +1594,18 @@ server.registerTool(
         }
         rows.push([
           i.id,
-          (figma.get(i.id) || {}).frameId || "",
-          b.text,
+          (figma.get(stem) || figma.get(i.id) || {}).frameId || "",
+          i.pluralForm || "",
+          sourceForm || b.text,
           i.text,
           i.text,          // suggested — pre-filled so an unchanged cell means "no edit"
           "",              // verdict
           "",              // reason_category
           "",              // reason_detail
-          hashText(b.text),
+          hashText(sourceForm || b.text),
         ]);
       }
-      const headers = ["dev_id", "screen", "base_en", `current_${v}`, `suggested_${v}`, "verdict", "reason_category", "reason_detail", "base_hash"];
+      const headers = ["dev_id", "screen", "plural_form", "base_en", `current_${v}`, `suggested_${v}`, "verdict", "reason_category", "reason_detail", "base_hash"];
       const file = path.join(REVIEW_DIR, `${projectId}-${v}${pageId ? "-" + pageId.replace(/[:]/g, "_") : ""}.csv`);
       fs.writeFileSync(file, toCsv(headers, rows));
       written.push({ variantId: v, rows: rows.length, path: file, ...(skippedOffPage ? { skippedOffPage } : {}) });
@@ -1535,6 +1694,11 @@ server.registerTool(
     for (const r of rows) {
       const id = (r.dev_id || "").trim();
       if (!id) continue;
+      // A plural row's dev_id carries its form suffix ("split-plan-option_few").
+      // Writing it back means upserting that form on the stem item, not
+      // patching a developer ID that does not exist on its own.
+      const pluralForm = (r.plural_form || "").trim();
+      const stemId = pluralForm ? id.replace(new RegExp(`_${pluralForm}$`), "") : id;
       const suggested = r[sugCol] ?? "";
       const current = r[curCol] ?? "";
       const verdict = (r.verdict || "").trim().toLowerCase();
@@ -1543,7 +1707,7 @@ server.registerTool(
 
       if (!changed && !approve) { deferred.push(id); continue; }
 
-      const liveBase = base.get(id);
+      const liveBase = base.get(id) ?? base.get(stemId);
       if (liveBase === undefined) { rejected.push({ id, why: "no such item in this project" }); continue; }
 
       // Staleness: the English moved while the sheet was out for review.
@@ -1574,7 +1738,8 @@ server.registerTool(
           to: changed ? suggested : current,
         });
       }
-      if (changed) edits.push({ id, text: suggested }); else approvals.push(id);
+      if (changed) edits.push({ id: stemId, text: suggested, pluralForm });
+      else approvals.push(stemId);
     }
 
     // Never write a component's translation from a review sheet.
@@ -1600,10 +1765,15 @@ server.registerTool(
       const known = new Set((await fetchVariables()).map((v) => v.name));
       await dittoPatch({
         variantId, forceVariantCreation: true,
-        updates: writableEdits.map((e) => ({
-          developerId: e.id, text: e.text, status,
-          variables: [...new Set(placeholdersOf(e.text))].filter((n) => known.has(n)),
-        })),
+        updates: writableEdits.map((e) => (e.pluralForm
+          ? {
+              developerId: e.id, status,
+              plurals: { upsert: [{ form: e.pluralForm, text: e.text }] },
+            }
+          : {
+              developerId: e.id, text: e.text, status,
+              variables: [...new Set(placeholdersOf(e.text))].filter((n) => known.has(n)),
+            })),
       });
     }
     let promoted = 0;

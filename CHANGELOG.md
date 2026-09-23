@@ -5,6 +5,70 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.0] - 2026-09-23
+
+Deletion, Figma reconciliation, content-level filtering, and two defects found
+on a live Salary Loan run.
+
+### Added
+- **`delete_text_items`** — there was no exposed delete path at all; removing 11
+  wrongly-imported items meant driving `ditto-api.js` from a node script. **Dry
+  run by default**: without `confirm: true` it changes nothing and shows what
+  each deletion would take with it — variants, plural rows, Figma instances.
+  A snapshot of the full rows is written **before** any deletion, always, and
+  the path returned: Ditto has no undo. Refuses component-governed items, and
+  refuses FINAL items that already have translations unless `force: true`.
+  Unknown IDs come back as `missing`, never failing the batch. Verifies by
+  re-reading rather than trusting `{success: true}`.
+- **`reconcile_with_figma`** — reports items whose Figma nodes have been
+  deleted. **Matches on node IDs, never on text.** Text matching produces false
+  orphans two ways, both seen live: a variablised item deliberately no longer
+  matches its frame (`{{loan_amount}}` vs `ď1,000`), and an edited string stops
+  matching the moment a designer changes it — one mid-session "12%" → "2.5%"
+  edit would have marked healthy FINAL copy as dead. Reports ORPHANED (delete
+  candidates), PARTIALLY STALE (prune, never delete) and NO INSTANCES (never
+  auto-deleted — absence of linkage is not evidence the copy is dead). Deletes
+  through the same guarded path, snapshot included.
+- **Content-level signals in the link-pass filter**, for documentation that sits
+  INSIDE a phone-sized frame where no size rule can see it: `ANNOTATION_MARKER`
+  (📌, ⚠️, "Note:"), `FOREIGN_SCRIPT` (configurable — this workspace ships
+  Arabic, Hindi and Urdu, so a Latin-only rule would reject real copy),
+  `SPEC_PROSE` (long AND multi-line) and `KEYBOARD_CHROME`. All overridable, all
+  reported with their own reason, all still importable via `includeOffScreen`.
+  **No person-name heuristic**, deliberately: "Yue Sui" is structurally
+  identical to a real name label and "abby"/"toy" to real short copy.
+
+### Fixed
+- **`list_untranslated` reported every plural form as missing.**
+  `fetchVariantPluralForms` keyed its map on `r.id`, but Ditto suffixes the form
+  onto the developer ID (`installments-count-title_one`), so the lookup never
+  matched. Both salary-loan items showed `missing: [zero…other]` while all six
+  forms existed. Stripping now uses the row's **own** `pluralForm`, so an item
+  legitimately named `payment_one` is not mangled.
+- **`propose_copy_fixes` could not see invisible separators.** The SPACING check
+  tested a literal space class, so U+2028 LINE SEPARATOR — what Figma writes for
+  Shift+Enter — was invisible to the checker as well as to the designer. New
+  `INVISIBLE` check covers U+2028/2029, NBSP, ZWSP, BOM and the bidi marks,
+  naming each character and its offset so there is something to look for.
+- TYPO no longer proposes renaming email domains ("gmail" is one edit from
+  "email"). Addresses and URLs are excluded from tokenising.
+
+### Notes
+- `KEYBOARD_CHROME` splits ambiguous from unambiguous keys. "Search" is a real
+  button label in ten projects here, so it counts as chrome only on a frame that
+  also draws "space"/"return"/"123" — a keyboard is never a lone "Search".
+- Plural rows come back with `variables: []`: Ditto's plural upsert takes no
+  `variables` field, so a `{{placeholder}}` inside a plural form substitutes at
+  runtime but is not tracked, and a dropped token there is not caught the way it
+  is on ordinary rows. Documented on the tool; `link_variables` has no plural
+  path either.
+- `/ditto-handoff` gains a cleanup step **before** renaming (on one run nine junk
+  items were named, variablised and reported, and one reached FINAL with an
+  Arabic translation), `reconcile_with_figma` in the audit, a corrected guardrail
+  that says to read BOTH lists, and a note that a hardcoded number is not safe
+  just because it looks like fixed policy.
+- 69 unit checks across five files.
+
 ## [0.32.0] - 2026-09-23
 
 ### Fixed

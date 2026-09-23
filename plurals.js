@@ -177,3 +177,16 @@ export function findPluralCandidates(items, variantId, { existingForms = new Map
   }
   return out;
 }
+
+// Ditto returns a plural row with the form appended to the developer ID:
+//   { id: "installments-count-title_one", pluralForm: "one" }
+// Keying a lookup on that raw id never matches the base item, which is how
+// list_untranslated came to report every Arabic form as missing on items that
+// already had all six. Strip using the row's OWN pluralForm rather than a blind
+// /_(one|two|…)$/ — a developer ID may legitimately end in a category name
+// ("payment_one"), and only the reported form tells the two apart.
+export function stripPluralSuffix(id, pluralForm) {
+  if (!pluralForm) return id;
+  const suffix = `_${pluralForm}`;
+  return id.endsWith(suffix) ? id.slice(0, -suffix.length) : id;
+}

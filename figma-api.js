@@ -273,15 +273,126 @@ export function partitionByScreen(nodes, bounds = DEFAULT_SCREEN_BOUNDS, opts = 
       defaultVariantBySet.set(n.componentSetId, n.variantId);
     }
   }
+  // Which frames draw a keyboard. A lone "Search" is a button; a "Search" beside
+  // "space" and "123" is the return key.
+  const keyboardFrames = new Set();
+  for (const n of nodes) {
+    if (KEY_UNAMBIGUOUS.test(String(n.text ?? "").trim())) keyboardFrames.add(n.topLevelFrameId);
+  }
+
   const onScreen = [], offScreen = [];
   for (const raw of nodes) {
     const n = raw.componentSetId
       ? { ...raw, defaultVariantId: defaultVariantBySet.get(raw.componentSetId) }
       : raw;
-    const c = opts.includeComponentSets && n.componentSetId
+    let c = opts.includeComponentSets && n.componentSetId
       ? { onScreen: true }
       : classifyTextNode(n, bounds);
+    // Content signals run even on text that passed the structural checks —
+    // that is the whole point: this documentation sits inside a real 393px
+    // frame and no size rule can see it.
+    if (c.onScreen) {
+      const content = classifyContent(n.text, {
+        ...opts,
+        frameHasKeyboard: keyboardFrames.has(n.topLevelFrameId),
+      });
+      if (content) c = { onScreen: false, reason: `${content.check} — ${content.reason}` };
+    }
     (c.onScreen ? onScreen : offScreen).push(c.onScreen ? n : { ...n, skipReason: c.reason });
   }
   return { onScreen, offScreen };
+}
+
+// ---- content-level signals ----------------------------------------------
+//
+// The structural checks above cannot see design documentation that sits INSIDE
+// a phone-sized frame. All of these were imported from one 393px frame and had
+// to be deleted by hand: a "📌 Note:" annotation, a 1,000-character bilingual
+// interaction spec, a designer's name, typed mock values ("abby", "toy") and a
+// mocked-up iOS keyboard ("123", "space", "return", "a|").
+//
+// Each signal is separately named in the reason, and each is overridable,
+// because every one of them can be wrong about a specific string. There is
+// deliberately NO "looks like a person's name" heuristic: "Yue Sui" is
+// structurally identical to a legitimate name label, and "abby"/"toy" are
+// indistinguishable from real short copy. That judgement belongs to the agent.
+
+const ANNOTATION_MARKER = /^\s*(?:[📌📍⚠️🚧✏️🔴🟡🔵]|note\s*:|todo\s*:|tbd\s*:|fyi\s*:|wip\s*:)/i;
+
+// Keyboard chrome, split by how ambiguous the key is.
+//
+// UNAMBIGUOUS keys are never product copy: nothing in a payments app is labelled
+// "space" or "#+=".
+const KEY_UNAMBIGUOUS = /^(?:space|return|shift|abc|123|#\+=|[a-z]\|)$/i;
+// AMBIGUOUS keys are also real button labels — "Search", "Go", "Done" and
+// "Next" appear as genuine CTAs across this workspace, and "Search" alone is
+// used in ten projects. Rejecting them on sight would delete real copy, so they
+// only count as chrome when an unambiguous key sits in the SAME frame: a
+// keyboard is drawn as a whole, never as a lone "Search".
+const KEY_AMBIGUOUS = /^(?:go|done|next|search|delete|send)$/i;
+
+const SCRIPTS = {
+  latin: /[A-Za-z]/,
+  arabic: /[\u0600-\u06FF\u0750-\u077F]/,
+  devanagari: /[\u0900-\u097F]/,
+  cjk: /[\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF]/,
+  cyrillic: /[\u0400-\u04FF]/,
+  thai: /[\u0E00-\u0E7F]/,
+};
+
+// Which scripts a project legitimately contains. Configurable because it is
+// workspace-specific: this one ships Arabic, Hindi and Urdu, so a
+// Latin-only rule would reject real copy.
+export const DEFAULT_ALLOWED_SCRIPTS = ["latin", "arabic", "devanagari"];
+
+function foreignScripts(text, allowed) {
+  const found = [];
+  for (const [name, re] of Object.entries(SCRIPTS)) {
+    if (allowed.includes(name)) continue;
+    if (re.test(text)) found.push(name);
+  }
+  return found;
+}
+
+export function classifyContent(text, opts = {}) {
+  const t = String(text ?? "");
+  const trimmed = t.trim();
+  if (!trimmed) return null;
+  const allowedScripts = opts.allowedScripts || DEFAULT_ALLOWED_SCRIPTS;
+  const specMinLength = opts.specMinLength ?? 200;
+  const skip = new Set(opts.disableContentChecks || []);
+
+  if (!skip.has("ANNOTATION_MARKER") && ANNOTATION_MARKER.test(trimmed)) {
+    return { check: "ANNOTATION_MARKER", reason: "starts with an annotation marker (📌, ⚠️, 'Note:' …) — a designer's note, not product copy" };
+  }
+  if (!skip.has("KEYBOARD_CHROME")) {
+    if (KEY_UNAMBIGUOUS.test(trimmed)) {
+      return { check: "KEYBOARD_CHROME", reason: `the whole string is "${trimmed}" — a mocked-up keyboard key, not copy the product owns` };
+    }
+    if (opts.frameHasKeyboard && KEY_AMBIGUOUS.test(trimmed)) {
+      return {
+        check: "KEYBOARD_CHROME",
+        reason: `"${trimmed}" is a keyboard key here — this frame also contains unambiguous keys ` +
+          "(space/return/123). On a frame without them it would be treated as a real button label",
+      };
+    }
+  }
+  if (!skip.has("FOREIGN_SCRIPT")) {
+    const foreign = foreignScripts(trimmed, allowedScripts);
+    if (foreign.length) {
+      return {
+        check: "FOREIGN_SCRIPT",
+        reason: `contains ${foreign.join(", ")} script, which this project does not ship ` +
+          `(allowed: ${allowedScripts.join(", ")}) — usually a spec written in another language`,
+      };
+    }
+  }
+  if (!skip.has("SPEC_PROSE") && trimmed.length > specMinLength && /\n/.test(trimmed)) {
+    return {
+      check: "SPEC_PROSE",
+      reason: `${trimmed.length} characters with line breaks inside one text node — real body copy is ` +
+        "rarely both this long and this structured; reads as an interaction spec",
+    };
+  }
+  return null;
 }

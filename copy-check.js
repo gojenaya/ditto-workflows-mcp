@@ -22,8 +22,20 @@ import * as fs from "fs";
 
 const WORD = /[A-Za-z][A-Za-z'’]*/g;
 
+// Tokens inside an email address or URL are not prose and must never be
+// spell-checked: "gmail" in "example@gmail.com" is one edit from "email", which
+// is how the check came to propose renaming a domain. Brand and domain names
+// are excluded for the same reason.
+const EMAIL_OR_URL = /(\b[\w.+-]+@[\w.-]+\.\w+)|((?:https?:\/\/|www\.)\S+)|(\b[\w-]+\.(?:com|net|org|io|ae|co|app|dev)\b)/gi;
+
+const KNOWN_DOMAINS = new Set([
+  "gmail", "outlook", "hotmail", "yahoo", "icloud", "protonmail", "com", "net", "org",
+]);
+
 function words(text) {
-  return String(text ?? "").match(WORD) || [];
+  // Blank out addresses and URLs before tokenising.
+  const cleaned = String(text ?? "").replace(EMAIL_OR_URL, " ");
+  return (cleaned.match(WORD) || []).filter((w) => !KNOWN_DOMAINS.has(w.toLowerCase()));
 }
 
 // Levenshtein, bailing out as soon as it exceeds `max` — we only ever care
@@ -248,12 +260,46 @@ function findAcronymCasing(items) {
   return out;
 }
 
-// 4. Whitespace. Invisible, and it breaks exact-match joins everywhere.
+// Invisible characters Figma inserts or carries through. LINE SEPARATOR is what
+// Shift+Enter produces — it looks like an ordinary line break in the canvas and
+// is completely invisible in any report that calls it "whitespace".
+const INVISIBLES = [
+  ["\u2028", "U+2028 LINE SEPARATOR", "Figma writes this for a soft line break (Shift+Enter)"],
+  ["\u2029", "U+2029 PARAGRAPH SEPARATOR", "breaks line wrapping unpredictably across renderers"],
+  ["\u00A0", "U+00A0 NO-BREAK SPACE", "looks like a space but never wraps"],
+  ["\u200B", "U+200B ZERO WIDTH SPACE", "invisible; splits words for search and matching"],
+  ["\uFEFF", "U+FEFF BYTE ORDER MARK", "invisible; usually pasted in by accident"],
+  ["\u200E", "U+200E LEFT-TO-RIGHT MARK", "bidi control — deliberate only in mixed-script copy"],
+  ["\u200F", "U+200F RIGHT-TO-LEFT MARK", "bidi control — deliberate only in mixed-script copy"],
+];
+
+// 4. Whitespace and invisible characters. Both break exact-match joins; the
+// invisible ones also break rendering, and no reviewer can see them.
 function findWhitespace(items) {
   const out = [];
   for (const it of items) {
     const t = String(it.text ?? "");
     if (!t) continue;
+
+    // Reported separately from "whitespace" and BY NAME, because a designer
+    // told only that a string has "extra whitespace" has nothing to look for
+    // in Figma — the character is invisible there too.
+    const found = INVISIBLES.filter(([ch]) => t.includes(ch));
+    if (found.length) {
+      out.push({
+        check: "INVISIBLE",
+        severity: "P1",
+        confidence: "high",
+        id: it.id,
+        text: t,
+        found: found.map(([, name]) => name).join(", "),
+        suggested: found.reduce((acc, [ch]) => acc.split(ch).join(" "), t).replace(/ {2,}/g, " ").trim(),
+        why: found.map(([, name, why]) => `${name}: ${why}`).join("; ") +
+          ". Invisible in Figma AND in any report that only says 'whitespace'.",
+        codepoints: [...t].map((c, i) => (found.some(([ch]) => ch === c) ? `${i}:U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}` : null)).filter(Boolean),
+      });
+    }
+
     const problems = [];
     if (t !== t.trim()) problems.push("leading or trailing whitespace");
     if (/ {2,}/.test(t.trim())) problems.push("doubled space");

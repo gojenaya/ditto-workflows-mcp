@@ -31,7 +31,7 @@ import {
 import { parseFigmaUrl, getFigmaTextNodes, isPlaceholder, normalizeText, partitionByScreen, FIGMA_KEY_HELP } from "./figma-api.js";
 import { validateDevId, isGenericName, proposeFromStructure, buildDigest, recallDevIds, rememberDevIds } from "./dev-ids.js";
 import { findCopyDefects, COPY_CHECKS } from "./copy-check.js";
-import { categoriesFor, validatePluralForms, isPluralCandidate, findPluralCandidates, localeOf, knownLocale, ALL_CATEGORIES } from "./plurals.js";
+import { categoriesFor, validatePluralForms, isPluralCandidate, findPluralCandidates, localeOf, knownLocale, stripPluralSuffix, ALL_CATEGORIES } from "./plurals.js";
 import { toCsv, fromCsv, hashText, placeholdersOf, placeholderDiff, REASON_CATEGORIES, REASON_CODES } from "./review-csv.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -85,8 +85,9 @@ async function fetchVariantPluralForms(projectId, variantId) {
   const out = new Map();
   for (const r of rows) {
     if (r.variantId !== variantId || !r.pluralForm) continue;
-    if (!out.has(r.id)) out.set(r.id, []);
-    out.get(r.id).push(r.pluralForm);
+    const stem = stripPluralSuffix(r.id, r.pluralForm);
+    if (!out.has(stem)) out.set(stem, []);
+    out.get(stem).push(r.pluralForm);
   }
   return out;
 }
@@ -864,7 +865,13 @@ server.registerTool(
               "Plural forms as {category: text}, e.g. {one:…, two:…, few:…, many:…, other:…}. Categories " +
               "are validated against the TARGET locale — Arabic has six, English two, Indonesian one — and " +
               "a category the locale does not have is rejected rather than written, because Ditto accepts " +
-              "it but no runtime would ever select it. Mutually exclusive with `text`.",
+              "it but no runtime would ever select it. Mutually exclusive with `text`. " +
+              "KNOWN LIMITATION: a {{placeholder}} inside a plural form stays LITERAL. Ditto's plural " +
+              "upsert takes no `variables` field, so plural rows come back with `variables: []` even " +
+              "though the form contains the token. It still substitutes at runtime — what is missing is " +
+              "Ditto's own tracking, so a dropped or renamed token inside a plural form is NOT caught the " +
+              "way it is on ordinary rows. Link the variable on the item's display text, and review " +
+              "plural forms by eye. link_variables has no plural path either.",
             ),
         }))
         .describe("Array of {id, text} or {id, plurals} — id is the base item developer ID"),
@@ -1467,6 +1474,9 @@ const REVIEW_DIR = path.join(DATA_DIR, "review-sheets");
 // Applied reviews accumulate here so propose_rules_from_reviews can count what
 // reviewers actually keep correcting, rather than asking them to summarise it.
 const REVIEW_LOG = path.join(DATA_DIR, "review-log.jsonl");
+// Deletion is irreversible in Ditto, so every delete writes the full rows here
+// first. This directory is the only undo that exists.
+const SNAPSHOT_DIR = path.join(DATA_DIR, "delete-snapshots");
 
 // Map dev ID -> {screen, page} from the backend's Figma linkage. Screen context
 // is the single biggest quality lever in a review sheet: a translator who can
@@ -3331,6 +3341,260 @@ server.registerTool(
         },
       ],
     };
+  },
+);
+
+// Shared so reconcile_with_figma deletes through exactly the same guards —
+// component protection, the FINAL-with-translations refusal, and the snapshot —
+// rather than re-implementing them more loosely.
+async function performDelete({ projectId, ids, confirm, force, reason }) {
+    const variantList = (await dittoFetch("/variants")).map((v) => ({ id: v.id }));
+    const all = await dittoFetch(`/textItems?filter=${encodeURIComponent(JSON.stringify({
+      projects: [{ id: projectId }], variants: [...variantList, { id: "base" }],
+    }))}`);
+
+    // Group every row that belongs to each target: the base item, its variants,
+    // and the plural rows that carry a suffixed developer ID.
+    const rowsFor = new Map(ids.map((id) => [id, []]));
+    for (const r of all) {
+      const stem = r.pluralForm ? stripPluralSuffix(r.id, r.pluralForm) : r.id;
+      if (rowsFor.has(stem)) rowsFor.get(stem).push(r);
+    }
+
+    const guard = await componentProtectedIds(projectId);
+    const figmaCounts = await figmaContextByDevId(projectId).catch(() => new Map());
+
+    const plan = [];
+    for (const id of ids) {
+      const rows = rowsFor.get(id) || [];
+      const base = rows.find((r) => !r.variantId && !r.pluralForm);
+      if (!base) { plan.push({ id, status: "missing", reason: "no item with this developer ID in the project" }); continue; }
+      const variants = [...new Set(rows.filter((r) => r.variantId && !r.pluralForm).map((r) => r.variantId))];
+      const pluralRows = rows.filter((r) => r.pluralForm);
+      const instances = ((figmaCounts.get(id) || {}).pages || []).length;
+      const entry = {
+        id,
+        text: base.text,
+        status: base.status,
+        variants,
+        variantCount: variants.length,
+        pluralRowCount: pluralRows.length,
+        figmaInstanceCount: instances,
+      };
+      if (guard.ids.has(id)) {
+        plan.push({ ...entry, status: "refused", reason: "governed by a library component — the design system owner's to remove, in the Ditto web app" });
+        continue;
+      }
+      if (base.status === "FINAL" && variants.length && !force) {
+        plan.push({
+          ...entry, status: "refused",
+          reason: `FINAL with ${variants.length} translation(s) (${variants.join(", ")}) — shipped, translated copy. ` +
+            "Pass force: true if you really mean to discard it.",
+        });
+        continue;
+      }
+      plan.push({ ...entry, status: "would delete", rows });
+    }
+
+    const deletable = plan.filter((p) => p.status === "would delete");
+    const strip = (p) => { const { rows, ...rest } = p; return rest; };
+
+    if (!confirm) {
+      return ({
+        projectId, dryRun: true,
+        wouldDelete: deletable.length,
+        refused: plan.filter((p) => p.status === "refused").length,
+        missing: plan.filter((p) => p.status === "missing").length,
+        items: plan.map(strip),
+        note:
+          "Nothing was changed. Deletion cascades to every variant and plural row shown above and cannot " +
+          "be undone in Ditto. Re-run with confirm: true to proceed; a snapshot is written first either way.",
+      });
+    }
+
+    // Snapshot BEFORE deleting — always, whatever the batch size.
+    fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const snapPath = path.join(SNAPSHOT_DIR, `${projectId}-${stamp}.json`);
+    fs.writeFileSync(snapPath, JSON.stringify({
+      projectId, at: stamp, reason: reason || null,
+      deleted: deletable.map((p) => ({ id: p.id, rows: p.rows })),
+    }, null, 2));
+
+    let apiError = null;
+    if (deletable.length) {
+      try { await deleteTextItems(projectId, deletable.map((p) => p.id)); }
+      catch (err) { apiError = err.message; }
+    }
+
+    // Verify by re-reading rather than trusting the API's {success:true}.
+    const after = await dittoFetch(`/textItems?filter=${encodeURIComponent(JSON.stringify({
+      projects: [{ id: projectId }], variants: [...variantList, { id: "base" }],
+    }))}`);
+    const stillThere = new Set(after.map((r) => (r.pluralForm ? stripPluralSuffix(r.id, r.pluralForm) : r.id)));
+
+    const results = plan.map((p) => {
+      if (p.status !== "would delete") return strip(p);
+      const gone = !stillThere.has(p.id);
+      return { ...strip(p), status: gone ? "deleted" : "failed", ...(gone ? {} : { reason: apiError || "still present after the delete call" }) };
+    });
+
+    return ({
+      projectId,
+      deleted: results.filter((r) => r.status === "deleted").length,
+      failed: results.filter((r) => r.status === "failed").length,
+      refused: results.filter((r) => r.status === "refused").length,
+      missing: results.filter((r) => r.status === "missing").length,
+      snapshot: snapPath,
+      snapshotNote: "Full rows (base + variants + plural rows) as they were. The only way back.",
+      results,
+    });
+  }
+
+server.registerTool(
+  "delete_text_items",
+  {
+    title: "Delete text items (dry run by default)",
+    description:
+      "Permanently delete base text items and everything attached to them — every variant, every plural " +
+      "row, every Figma instance. DRY RUN BY DEFAULT: without `confirm: true` nothing is written and you " +
+      "get back exactly what would go, including how many translations and plural rows would disappear " +
+      "with each item. A snapshot of the full rows is written to disk BEFORE any deletion, always, and its " +
+      "path is returned — Ditto has no undo, so that file is the only way back. Refuses component-governed " +
+      "items outright, and refuses FINAL items that already have translations unless `force: true`, because " +
+      "discarding shipped translated copy should take a second deliberate step. Unknown IDs are reported as " +
+      "`missing` rather than failing the batch.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID"),
+      ids: z.array(z.string().min(1)).min(1).describe("Developer IDs to delete"),
+      confirm: z.boolean().optional().describe("Must be explicitly true to delete. Omitted = dry run."),
+      force: z.boolean().optional().describe("Also delete FINAL items that have translations"),
+      reason: z.string().optional().describe("Why — recorded in the snapshot so the file explains itself later"),
+    },
+  },
+  async ({ projectId, ids, confirm, force, reason }) => {
+    const out = await performDelete({ projectId, ids, confirm, force, reason });
+    return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
+  },
+);
+
+server.registerTool(
+  "reconcile_with_figma",
+  {
+    title: "Reconcile a project against Figma (dry run by default)",
+    description:
+      "Compare a project's items against the CURRENT Figma file and report which are orphaned — every " +
+      "Figma node they were linked to has been deleted. Use after a designer removes or rebuilds frames. " +
+      "MATCHES ON FIGMA NODE IDs, NEVER ON TEXT. Text matching produces false orphans two ways, both seen " +
+      "on live projects: a variablised item deliberately no longer matches its Figma text (the item reads " +
+      "`{{loan_amount}}`, the frame reads `ď1,000`), and an edited string stops matching the moment a " +
+      "designer changes the copy — one mid-session edit from '12%' to '2.5%' would have marked healthy, " +
+      "live FINAL items as dead. Node IDs survive both. " +
+      "Reports three categories separately: ORPHANED (every instance gone — delete candidates), " +
+      "PARTIALLY STALE (some instances gone — prune the dead instances, never delete the item), and " +
+      "NO INSTANCES (never linked or hand-created — reported for information and NEVER auto-deleted, " +
+      "because absence of linkage is not evidence the copy is dead). Dry run unless apply AND confirm.",
+    inputSchema: {
+      projectId: z.string().describe("Ditto project developer ID"),
+      figmaUrls: z.array(z.string()).min(1)
+        .describe("Figma links covering the WHOLE scope you are reconciling. An item linked to a frame you " +
+          "did not pass will look orphaned — pass every page/section the project draws from."),
+      apply: z.boolean().optional().describe("Prune stale instances and delete orphans (needs confirm too)"),
+      confirm: z.boolean().optional().describe("Second gate, required alongside apply"),
+      force: z.boolean().optional().describe("Passed through to deletion for FINAL items with translations"),
+    },
+  },
+  async ({ projectId, figmaUrls, apply, confirm, force }) => {
+    // Every node id that currently exists anywhere under the given selections.
+    const liveNodeIds = new Set();
+    const scanned = [];
+    for (const url of figmaUrls) {
+      const { fileKey, nodeId } = parseFigmaUrl(url);
+      const nodes = await getFigmaTextNodes(fileKey, nodeId);
+      for (const n of nodes) {
+        liveNodeIds.add(n.figmaNodeId);
+        if (n.topLevelFrameId) liveNodeIds.add(n.topLevelFrameId);
+      }
+      scanned.push({ fileKey, nodeId, textNodes: nodes.length });
+    }
+    if (!liveNodeIds.size) {
+      return { content: [{ type: "text", text:
+        "Those links contain no text nodes, so every item would look orphaned. Refusing to report against " +
+        "an empty scan — check the links." }], isError: true };
+    }
+
+    const mongoId = await projectMongoIdByDevId(projectId);
+    const dump = await fetchWorkspaceDump();
+    const orphaned = [], partial = [], noInstances = [];
+    for (const it of dump) {
+      if (it.doc_ID !== mongoId || !it.developerId) continue;
+      const instances = (((it.integrations || {}).figmaV2 || {}).instances) || [];
+      if (!instances.length) {
+        noInstances.push({ id: it.developerId, text: (it.text || "").slice(0, 80), status: it.status });
+        continue;
+      }
+      const alive = instances.filter((x) => liveNodeIds.has(x.figmaNodeId));
+      const dead = instances.filter((x) => !liveNodeIds.has(x.figmaNodeId));
+      if (!alive.length) {
+        orphaned.push({
+          id: it.developerId, text: (it.text || "").slice(0, 80), status: it.status,
+          deadInstances: dead.length,
+          lastFrames: [...new Set(dead.map((d) => d.figmaTopLevelFrameId).filter(Boolean))].slice(0, 3),
+        });
+      } else if (dead.length) {
+        partial.push({
+          id: it.developerId, text: (it.text || "").slice(0, 80),
+          alive: alive.length, stale: dead.length,
+        });
+      }
+    }
+
+    const summary = {
+      projectId,
+      scanned,
+      liveFigmaNodes: liveNodeIds.size,
+      matchedOn: "figmaNodeId — never text, so variablised and edited copy is not mistaken for dead",
+      orphaned: orphaned.length,
+      partiallyStale: partial.length,
+      noInstances: noInstances.length,
+      orphanedItems: orphaned,
+      partiallyStaleItems: partial,
+      noInstanceItems: noInstances.slice(0, 40),
+      noInstanceNote:
+        "Never linked to Figma, or created by hand. Reported for information only and never deleted — " +
+        "absence of linkage is not evidence the copy is dead.",
+    };
+
+    if (!apply || !confirm) {
+      return { content: [{ type: "text", text: JSON.stringify({
+        ...summary, dryRun: true,
+        note: apply && !confirm
+          ? "apply was set but confirm was not — nothing was changed."
+          : "Nothing was changed. Re-run with apply: true and confirm: true to prune stale instances and delete orphans.",
+        beforeYouApply:
+          "Check that figmaUrls covered every frame this project draws from. An item whose frame you did " +
+          "not scan appears here as orphaned, and applying would delete live copy.",
+      }, null, 2) }] };
+    }
+
+    // Deleting goes through the same guarded path as delete_text_items, so the
+    // component guard, the FINAL-with-translations refusal and the snapshot all
+    // apply here too rather than being re-implemented loosely.
+    let deleteReport = null;
+    if (orphaned.length) {
+      deleteReport = await performDelete({
+        projectId, ids: orphaned.map((o) => o.id), confirm: true, force,
+        reason: `reconcile_with_figma: every Figma instance deleted (scanned ${scanned.map((x) => x.nodeId).join(", ")})`,
+      });
+    }
+    return { content: [{ type: "text", text: JSON.stringify({
+      ...summary, applied: true,
+      deletion: deleteReport,
+      stalePruningNote:
+        "Stale instances on partially-stale items were NOT pruned: the backend connect endpoint replaces an " +
+        "item's whole instance set, so pruning safely needs the full live set rebuilt by a link pass. " +
+        "Re-run figma_link_pass on the affected frames to refresh them.",
+    }, null, 2) }] };
   },
 );
 

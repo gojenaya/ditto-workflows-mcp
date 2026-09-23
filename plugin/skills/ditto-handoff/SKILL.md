@@ -62,13 +62,31 @@ Two rules when you fan out:
        but the default. Re-run with `screenBounds` widened, or `includeComponentSets: true`, for that case.
      - *Something imported is not copy.* Slides, flow labels and designer notes that slipped through.
      Report what was skipped in the final summary either way — the user knows their file; you do not.
-     Checking `floating === 0` alone tells you nothing about this: on a real Salary Loan run, a
-     mis-detected screen container and a duplicated component set both passed the floating check and
-     still shipped wrong copy.
+     **`floating === 0` is not the guardrail — it is one of two.** It passes happily while
+     `skippedOffScreenItems` contains real problems, and it did: on a Salary Loan run a mis-detected
+     screen container and a duplicated component set both passed the floating check and still shipped
+     wrong copy. Read BOTH lists, every run.
    - **Guardrail B — items must NOT be floating.** Linking a Figma frame is only "done" when every item's copy actually lands under its frame in Ditto (the `connect` step persisted its instances). Check **both** `counts.floating === 0` **and** `counts.instancesPersisted === counts.instancesConnected`. `floating` now covers created *and* connected-to-existing items and counts partial persistence (fewer instances than sent), not just zero — an earlier version scoped it to created items only, which made `floating: 0` mean "no NEW item is floating" while most of the connected ones had silently landed nowhere. The tool resolves the true page, sends the connect in small batches, and re-verifies with retries, so anything still short means the backend genuinely rejected it. Do NOT proceed as if the section is linked. Diagnose before continuing:
      - Common cause: a `figmaPageId` / frame mismatch, or the Figma node is already claimed by another item. The `floating` list names the affected items + screens.
      - Workaround (as used in the SNPL branch case): re-run the `connect` for just the floating items with the **correct resolved page** (`GET /v1/files/{key}?ids={node}&depth=2` → the one CANVAS that comes back with children is the real page), then re-verify `figmaV2.instances` persisted. Only continue once `floating` is 0.
      - If it still won't link after the workaround, stop and report it — shipping floating copy to FINAL is worse than pausing.
+1b. **CLEAN UP before you name anything.** Read the `created` list and judge each item: is this really
+   product copy? The structural and content filters catch a lot, but neither can catch everything inside
+   a phone-sized frame, and two categories are explicitly left to you because no heuristic can settle
+   them safely:
+   - **Mock values typed into form fields** — "abby", "toy", a sample name in an input. Indistinguishable
+     from real short copy by shape alone.
+   - **A person's name used as a label** — "Yue Sui" looks exactly like a legitimate name field.
+   Also watch for spec fragments, stray labels and anything that reads as a designer talking to a
+   developer rather than to a user.
+   - **Do this BEFORE renaming.** Everything downstream compounds: on one run nine junk items were
+     named, variablised, reported, and one reached FINAL with an Arabic translation before anyone
+     noticed. Deleting first costs one step; deleting last costs five.
+   - Use `delete_text_items(projectId, ids)` — it is a **dry run by default** and shows what each
+     deletion would take with it (variants, plural rows, Figma instances).
+   - **On a live project, show the user the dry run and get their go-ahead before passing `confirm`.**
+     A playground is yours to clean; a shipping project is not. The dry run is exactly what to show them.
+
 2. **Rename dev IDs — apply automatically, across BOTH result lists.** Go through `created` **and** `connectedToExisting` (both come back with dev IDs + screen names), decide semantic IDs, and apply them directly via `rename_developer_id(projectId, renames)` — one call, no approval step.
    - **Start with `propose_developer_ids(figmaUrl, projectId)`.** It resolves what the design already answers — component-library strings and unambiguous UI roles — and hands back the rest as a compact digest (one line per string with font size, weight and container, in reading order). Name those from the digest; it carries the hierarchy a flat list of strings loses, at a fraction of the tokens of a screenshot. It also returns IDs it has seen before, so a re-run does not rename anything.
    - `rename_developer_id` **rejects** copy-derived and generic targets — including Ditto's own slug-plus-counter (`abc-1`, `home-2`, `okay-3`), which reads as a deliberate name but is just the copy again. A rejection comes back with the reason; fix the name rather than passing `allowAnyId`.
@@ -108,7 +126,13 @@ Two rules when you fan out:
    - Real case: a run shipped "Interes" and "Processing fee (inclu. vat)". The Arabic translator quietly
      corrected the first, so the base and the variant then disagreed about what the string even was.
 
-6. **Audit before reporting — don't trust the step reports.** Each step returns its own summary; those summaries are what let silent failures through. Re-read the project and confirm: every item's Figma instances persisted, no dev ID still looks auto-generated, no item still holds a hardcoded dynamic value, and no variant has empty text at FINAL. Fix anything that turns up, then report.
+6. **Audit before reporting — don't trust the step reports.**
+   - **On a re-run of a frame that has changed, call `reconcile_with_figma(projectId, [figmaUrl])` (dry
+     run).** It matches on Figma NODE IDs, never on text, so variablised items and edited copy are not
+     mistaken for dead — a text-based check would flag every `{{placeholder}}` item as an orphan. It
+     reports orphans (every instance gone), partially stale items (prune, never delete) and items with
+     no linkage at all (never auto-delete — absence of linkage is not evidence the copy is dead).
+     Pass EVERY frame the project draws from: an item whose frame you did not scan looks orphaned. Each step returns its own summary; those summaries are what let silent failures through. Re-read the project and confirm: every item's Figma instances persisted, no dev ID still looks auto-generated, no item still holds a hardcoded dynamic value, and no variant has empty text at FINAL. Fix anything that turns up, then report.
 7. **Report once, at the end:** connected / created / renamed / variablised / translated / set-to-FINAL counts, ambiguous or skipped items, and any variables that need creating in the web app. Because the batch is already FINAL, call out anything you were unsure about so the user can spot-check it directly in Ditto.
 
 ## Rules
@@ -116,6 +140,12 @@ Two rules when you fan out:
 - **On a live project, scope every write to this pass's own items.** Two rules in this skill are safe only in a sandbox. Step 2's rename covers connect-to-existing items — on production that overwrites dev IDs developers may already reference. Step 5's preferred `fromStatus` sweep promotes *everything* currently at NONE/WIP/REVIEW, including pre-existing items that have nothing to do with this handoff (on one real run that would have shipped 9 unrelated items to FINAL). For any project that isn't a playground: snapshot first, leave pre-existing dev IDs alone unless asked, and promote with an explicit `ids` list. Ask which project is which if you can't tell.
 - **Components: linked automatically, never edited.** `figma_link_pass` links matching texts to their library component — that *applies* the design system and changes nothing about the component. But a linked item is then component-governed, and every write tool will refuse it: base text, variables, translations, status, dev-ID rename, merging. **Expect the rest of the handoff to skip those items, and report the skips as correct behaviour, not failures.** This holds whatever the translation's state — including when it is *missing*: do not fill in a component's absent translation, because that copy would land in every project using it. Refusals arrive as `componentLinkedSkipped`. If a component genuinely needs new or corrected copy, name it in your final report for the design-system owner to change in the Ditto web app. Reading components (`list_components`, `search_text`) is encouraged — that is how you avoid duplicating copy that already exists.
 - **A configured default variant is an instruction, not a hint.** Translate into it without being asked and without confirming the language. The only reasons to skip are an explicit "don't translate" or `defaultVariantExists: false`.
+- **A hardcoded number is not safe just because it looks like fixed policy.** Rates, tenors and
+  thresholds change, and they change mid-design: on one run a designer edited "Total interest (12%)" to
+  "(2.5%)" and "fixed at 6 months" to "3 months" while the handoff was in progress. The variablised
+  items absorbed it silently; the eligibility thresholds left as literals in an earlier section
+  (2 months / 3 months / 6 months / 35 days) would have shipped stale. Treat a number a user could see
+  change as a variable candidate, whatever the surrounding copy implies about its permanence.
 - **Autonomous by default — don't stop for approvals.** Stop only for real blockers (auth, ambiguous project). If the user explicitly says they want to review as you go, switch to presenting each step for approval instead.
 - **Never export a review sheet as part of this flow.** `export_review_csv` / `export_review_sheet` are
   for when a human translator is going to check the work, which is a different job with a different

@@ -118,8 +118,11 @@ function walk(node, results, ctx) {
   const next = { ...ctx };
   if (node.type === "CANVAS") next.pageId = node.id;
   if (node.type === "FRAME" && !ctx.frameId) {
+    const fb = node.absoluteBoundingBox || {};
     next.frameId = node.id;
     next.frameName = node.name;
+    next.frameWidth = fb.width || 0;
+    next.frameHeight = fb.height || 0;
   }
   // Ancestor container names are the raw material for a semantic developer ID:
   // "repayment-card__summary" says far more about a string's purpose than the
@@ -130,6 +133,11 @@ function walk(node, results, ctx) {
     next.ancestors = [...(ctx.ancestors || []), node.name].slice(-4);
   }
   if (node.type === "INSTANCE" && node.name) next.componentName = node.name;
+  // A COMPONENT / COMPONENT_SET holds real product copy even though it sits
+  // loose on the canvas rather than inside a phone frame — that is simply where
+  // Figma keeps component definitions. Without this, every design-system
+  // component's copy is misread as an annotation.
+  if (node.type === "COMPONENT" || node.type === "COMPONENT_SET") next.inComponent = true;
   if (node.type === "TEXT" && node.characters?.trim()) {
     const bbox = node.absoluteBoundingBox || {};
     const st = node.style || {};
@@ -142,6 +150,12 @@ function walk(node, results, ctx) {
       position: { x: bbox.x || 0, y: bbox.y || 0, width: bbox.width || 0, height: bbox.height || 0 },
       // Naming signals. `layerName` is often junk (copy-paste debris like
       // "Sync Contacts" on an interest note) so it is offered, never trusted.
+      // Dimensions of the enclosing top-level frame, so callers can tell a
+      // product screen from a slide, a spec board or a loose annotation.
+      frameWidth: next.frameWidth || 0,
+      frameHeight: next.frameHeight || 0,
+      inFrame: !!next.frameId,
+      inComponent: !!next.inComponent,
       layerName: node.name || null,
       ancestors: next.ancestors || [],
       componentName: next.componentName || null,
@@ -150,4 +164,51 @@ function walk(node, results, ctx) {
     });
   }
   for (const child of node.children || []) walk(child, results, next);
+}
+
+// ---- product screen vs annotation ----------------------------------------
+//
+// A design file holds far more text than the product does: presentation slides,
+// spec boards, sticky notes, "TO-BE" labels, and a designer's running commentary
+// beside the screens. On the SNPL page, "For ditto integration only" and a
+// paragraph about an upcoming layout change sat as loose TEXT nodes directly
+// under the section, right next to six real 393x852 phone screens. All of it
+// became Ditto items.
+//
+// The reliable signal is structural, not textual: product copy lives INSIDE a
+// device-sized frame. Annotations are either loose on the canvas/section, or
+// inside a frame that is obviously not a phone (a 1920x1080 slide).
+
+// Generous enough for iPhone SE (320) through to a large Android (480), and for
+// a tall scrolling artboard. Override per call when a project designs tablet.
+export const DEFAULT_SCREEN_BOUNDS = { minWidth: 280, maxWidth: 600 };
+
+export function classifyTextNode(node, bounds = DEFAULT_SCREEN_BOUNDS) {
+  // Component definitions are product copy wherever they live on the canvas.
+  if (node.inComponent) return { onScreen: true };
+  if (!node.inFrame) {
+    return { onScreen: false, reason: "not inside any frame or component — loose text on the canvas or section" };
+  }
+  const w = node.frameWidth || 0;
+  if (w && (w < bounds.minWidth || w > bounds.maxWidth)) {
+    return {
+      onScreen: false,
+      reason: `frame is ${Math.round(w)}px wide — outside the ${bounds.minWidth}-${bounds.maxWidth}px device range ` +
+        `(slide, spec board or documentation frame)`,
+    };
+  }
+  return { onScreen: true };
+}
+
+// Split extracted nodes into the copy that belongs in Ditto and the rest.
+// Returns both halves: what is skipped must be reported, never silently dropped
+// — a designer whose annotation is excluded should be told, and a real screen
+// wrongly excluded has to be visible to be fixable.
+export function partitionByScreen(nodes, bounds = DEFAULT_SCREEN_BOUNDS) {
+  const onScreen = [], offScreen = [];
+  for (const n of nodes) {
+    const c = classifyTextNode(n, bounds);
+    (c.onScreen ? onScreen : offScreen).push(c.onScreen ? n : { ...n, skipReason: c.reason });
+  }
+  return { onScreen, offScreen };
 }

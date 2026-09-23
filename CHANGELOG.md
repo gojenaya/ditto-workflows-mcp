@@ -5,6 +5,34 @@ All notable changes to ditto-workflows-mcp are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-09-23
+
+Only product copy reaches Ditto now.
+
+A design file holds far more text than the product does. On one SNPL page, 1,100
+text nodes included 261 on presentation slides, a designer's paragraph about an
+upcoming layout change, flow labels like "Back intercept" and "Exit MP", and
+stickers reading "TO-BE" and "For ditto integration only" — 275 strings that no
+engineer will ever reference, all of which used to become Ditto items.
+
+### Added
+- `figma_link_pass` imports only text on a **product screen**. The signal is
+  structural rather than textual: product copy lives inside a device-sized frame
+  (280-600px wide). Anything loose on the canvas, or inside a 1920x1080 slide or
+  a 78px flow label, is documentation.
+- **Component definitions are exempt.** Copy inside a COMPONENT or COMPONENT_SET
+  is kept even though it sits outside any frame — that is simply where Figma
+  stores it. Without this exemption the filter dropped real copy: "Available to
+  send" and "Repay your dues to unlock sending" live in a Balance card component
+  set, outside every phone frame.
+- Everything skipped is **reported** under `skippedOffScreenItems` with the
+  reason and frame, never silently dropped — a real screen wrongly excluded has
+  to be visible to be fixable. `includeOffScreen: true` imports everything.
+
+### Notes
+- Verified on the three naya2 test sections: 21, 6 and 133 strings, none skipped.
+  On the SNPL documentation page: 1,100 in, 825 kept, 275 correctly excluded.
+
 ## [0.27.0] - 2026-09-22
 
 Skill guidance, no code change.

@@ -28,7 +28,7 @@ import {
   fetchVariables,
   deriveVariableExamples,
 } from "./ditto-backend.js";
-import { parseFigmaUrl, getFigmaTextNodes, isPlaceholder, normalizeText, FIGMA_KEY_HELP } from "./figma-api.js";
+import { parseFigmaUrl, getFigmaTextNodes, isPlaceholder, normalizeText, partitionByScreen, FIGMA_KEY_HELP } from "./figma-api.js";
 import { validateDevId, isGenericName, proposeFromStructure, buildDigest, recallDevIds, rememberDevIds } from "./dev-ids.js";
 import { toCsv, fromCsv, hashText, placeholdersOf, placeholderDiff, REASON_CATEGORIES, REASON_CODES } from "./review-csv.js";
 
@@ -2300,7 +2300,12 @@ server.registerTool(
   {
     title: "Link a Figma frame's copy into Ditto (unofficial)",
     description:
-      "Pull every text node under a Figma frame/section and wire it into a Ditto project: texts matching an " +
+      "Pull the product copy under a Figma frame/section and wire it into a Ditto project. Only text on a " +
+      "PRODUCT SCREEN is imported — text that sits loose on the canvas or inside a non-phone-sized frame " +
+      "(presentation slides, spec boards, flow labels, 'TO-BE' notes, a designer's commentary) is design " +
+      "documentation, not copy, and is skipped and reported under skippedOffScreenItems. Copy inside a " +
+      "COMPONENT or COMPONENT_SET is always kept, since that is where Figma stores component definitions. " +
+      "Pass includeOffScreen to import everything. Then: texts matching an " +
       "existing item are connected to it, new texts become WIP items (created + connected), and texts matching " +
       "a library component are additionally linked to that component. Returns created items with their " +
       "auto-generated developer IDs and screen (frame) names — use rename_developer_id afterwards to give the " +
@@ -2313,14 +2318,29 @@ server.registerTool(
     inputSchema: {
       projectId: z.string().describe("Ditto project developer ID (public API id, e.g. from list_projects)"),
       figmaUrl: z.string().describe("Figma 'Copy link to selection' URL (must contain node-id)"),
+      includeOffScreen: z
+        .boolean()
+        .optional()
+        .describe(
+          "Also import text that is not on a product screen — slides, spec boards, flow labels and loose " +
+          "annotations. Off by default; they are design commentary, not copy an engineer references.",
+        ),
     },
   },
-  async ({ projectId, figmaUrl }) => {
+  async ({ projectId, figmaUrl, includeOffScreen }) => {
     const { fileKey, nodeId } = parseFigmaUrl(figmaUrl);
 
     // 1. Figma text nodes under the selection (placeholders + hidden pruned).
     const figmaNodes = await getFigmaTextNodes(fileKey, nodeId);
-    const realNodes = figmaNodes.filter((n) => !isPlaceholder(n.text));
+    const afterPlaceholders = figmaNodes.filter((n) => !isPlaceholder(n.text));
+    // A design file carries more text than the product does: presentation
+    // slides, spec boards, flow labels, "TO-BE" stickers and the designer's
+    // running commentary beside the screens. None of it is copy an engineer
+    // will ever reference, and all of it used to become Ditto items.
+    const { onScreen, offScreen } = includeOffScreen
+      ? { onScreen: afterPlaceholders, offScreen: [] }
+      : partitionByScreen(afterPlaceholders);
+    const realNodes = onScreen;
     if (!realNodes.length) {
       return {
         content: [{ type: "text", text: `No real copy found under that Figma node (${figmaNodes.length} text node(s), all placeholders/empty).` }],
@@ -2520,7 +2540,9 @@ server.registerTool(
               figma: { fileKey, nodeId },
               counts: {
                 figmaTextNodes: figmaNodes.length,
-                afterPlaceholderFilter: realNodes.length,
+                afterPlaceholderFilter: afterPlaceholders.length,
+                onProductScreens: realNodes.length,
+                skippedOffScreen: offScreen.length,
                 uniqueTexts: byText.size,
                 connectedToExisting: toLink.length,
                 created: created.length,
@@ -2538,7 +2560,18 @@ server.registerTool(
               ...(componentMatches.length
                 ? {
                     componentMatches,
-                    componentMatchesNote:
+                    ...(offScreen.length ? {
+        skippedOffScreenItems: [...new Map(offScreen.map((n) => [normalizeText(n.text), n])).values()]
+          .slice(0, 40)
+          .map((n) => ({ text: n.text.slice(0, 80), reason: n.skipReason, frame: n.frameName })),
+        skippedOffScreenNote:
+          "These texts are NOT on a product screen — they sit loose on the canvas or inside a frame that " +
+          "is not phone-sized (a slide, spec board or flow label), so they were not added to Ditto. " +
+          "Component definitions are exempt: copy inside a COMPONENT or COMPONENT_SET is kept even though " +
+          "it lives outside a frame. If something here IS real product copy, the frame is probably an " +
+          "unusual size — re-run with includeOffScreen: true and rename it afterwards.",
+      } : {}),
+      componentMatchesNote:
                       "These texts also exist as library components and have been LINKED to them — that " +
                       "applies the design system and leaves the component itself untouched. Linked items are " +
                       "now component-governed, so the rest of this handoff will skip them: their copy, " +
